@@ -51,6 +51,14 @@ All configuration is set directly in the `environment:` block of `compose.yaml`.
 
 The published port is hardcoded to `8443:8443/tcp` in `compose.yaml`'s `ports:` section — change it there if you need a different host port.
 
+### TLS via env vars
+
+`PDM_TLS_CERT_B64` and `PDM_TLS_KEY_B64` accept base64-encoded PEM. Both must be set, or both empty. On every boot, `pdm-init.sh` decodes them, validates the cert/key match by public-key digest, and writes them to `/etc/proxmox-datacenter-manager/auth/api.{pem,key}`. The cert is treated as CA-signed (subject != issuer), so the FQDN-mismatch auto-rotate logic leaves it alone. Generate with `base64 -w0 < fullchain.pem`.
+
+### SSH access (opt-in)
+
+`docker compose exec pdm bash` is the default way in. To enable a real sshd inside the container, set `PDM_SSH_ENABLED: "1"`, populate `PDM_ROOT_SSH_KEYS` (newline-separated public keys), and uncomment the `2222:22/tcp` port mapping in `compose.yaml`. The daemon is hardened: key-only root login (`PermitRootLogin prohibit-password`), password and challenge-response auth disabled, no X11/agent/TCP forwarding, max 3 auth attempts, 30 s login grace. Host keys are persisted to the `pdm-data` volume so the host fingerprint survives `docker compose up --force-recreate`. If `PDM_SSH_ENABLED=1` but no authorized_keys are present, the service refuses to start (otherwise password-auth-disabled sshd would be locked out).
+
 ## Volumes
 
 Two named volumes hold all persistent state. Both must survive container recreation; losing them is destructive.
@@ -157,9 +165,62 @@ make init-shell    # bash inside a freshly-built image (debug)
 make pdm-version   # print PDM version from inside the container
 make set-password  # reset root password using compose.yaml's PDM_ROOT_PASSWORD
 make lint          # validate compose syntax
+make verify        # hadolint + shellcheck + compose lint (best-effort)
+make cert-show     # print TLS subject/SAN/expiry from the running container
+make journalctl    # live-tail the in-container systemd journal
+make backup        # tar both volumes to ./pdm-backup-<timestamp>.tar.gz
+make restore FILE=…  # restore both volumes from a backup (container must be stopped)
 make clean         # remove image (keep volumes)
 make reset         # DANGER: delete all volumes (factory reset)
 ```
+
+## Backup and restore
+
+`pdm-config` is irreplaceable — losing it factory-resets the install (auth keypair, registered remotes, ACLs, API tokens, TLS material all gone). `pdm-data` holds metrics and task logs (rebuildable but historically valuable). Back both up.
+
+```sh
+make backup                                   # writes pdm-backup-YYYYMMDDTHHMMSSZ.tar.gz
+make down                                     # restore needs the container stopped
+make restore FILE=pdm-backup-20260527T180000Z.tar.gz
+make up
+```
+
+The backup is a single gzipped tar of both volume contents, taken via a one-shot container that shares the compose-managed volume bindings (so it works regardless of `COMPOSE_PROJECT_NAME`). The container can stay running during `make backup`; restore requires it stopped. Store the resulting tarball off-host — losing both volumes and the backup is unrecoverable.
+
+## Network mode
+
+Default `compose.yaml` uses bridge networking with an explicit `8443:8443/tcp` mapping. For most deployments this is correct. Switch to `network_mode: host` only when one of these applies:
+
+- A managed PVE/PBS remote IP-allowlists by source address — bridge SNATs to the docker0 gateway, host mode preserves the real host IP.
+- Remotes live on a VLAN/subnet the host can reach by routing but the docker bridge can't.
+- `make scan CIDR=...` needs to see the real LAN for ARP-level discovery.
+
+Tradeoffs in host mode:
+- The UI binds to `:8443` on **every** host interface; if the host has a public IP, PDM is exposed unless you front it with a host-level firewall.
+- DNS / Time / Network panels stay broken (they read container filesystem state regardless of network mode); the DNS panel can additionally be dangerous if Docker's resolv.conf handling bind-mounts the host's file in. Don't touch the DNS panel under host networking.
+- The `ports:` block becomes a no-op (silently ignored) — drop it in your override.
+
+A `compose.host.yaml` overlay opt-in pattern: keep the default `compose.yaml`, add `compose.host.yaml` with `network_mode: host` + empty `ports: []`, and start with `docker compose -f compose.yaml -f compose.host.yaml up -d`.
+
+## Security model
+
+What's verified end-to-end and what isn't:
+
+- **ISO authenticity**: the extractor stage sha256-pins the ISO **and** GPG-verifies it against the Proxmox Trixie release key (`24B30F06ECC1836A4E5EFECBA7BCD1420BFE778E`). The key itself is fetched live from `enterprise.proxmox.com`, sha256-pinned at fetch time, and its fingerprint re-checked after import. Three independent checks before the ISO is unpacked.
+- **s6-overlay**: tarballs fetched from the just-containers GitHub release, sha256-verified against the published `.sha256` sidecars in the same release.
+- **Debian base updates**: pulled from `deb.debian.org` during build with apt's standard repo signing (Debian archive keys, pre-shipped in the squashfs).
+- **Runtime apt sources**: all removed after the build's install + dist-upgrade. The runtime image has no apt sources; runtime apt-update is a no-op.
+- **Process isolation**: `proxmox-datacenter-api` runs as `www-data`; only `proxmox-datacenter-privileged-api` runs as root, and only it has the auth keys + cert private key. They communicate over a UNIX socket on a tmpfs.
+- **Capabilities**: no `--privileged`, no `cap_add`, `no-new-privileges:true` in compose, no host bind mounts.
+- **Network**: only inbound `:8443` (and optional `:22` if `PDM_SSH_ENABLED=1`); outbound `:8006` (PVE) / `:8007` (PBS) per registered remote.
+
+What is **not** verified and you have to trust:
+
+- The Proxmox ISO contents themselves (you verify it came from Proxmox; you don't audit what Proxmox put in it).
+- The Debian package signing keys shipped inside the ISO's squashfs (transitively trusted from the ISO's GPG verification).
+- The image maintainer — to mitigate, pin to a specific image digest and review diffs across versions.
+
+See `SECURITY.md` for reporting vulnerabilities and the disclosure timeline.
 
 ## Upgrading
 

@@ -8,6 +8,12 @@ __pycache__/
 *.swp
 .DS_Store
 
+# Backup tarballs created by `make backup`.
+pdm-backup-*.tar.gz
+
+# CI/local scan artifacts.
+trivy-results.sarif
+
 # Build artifacts (the Dockerfile fetches the ISO itself)
 .iso-work/
 

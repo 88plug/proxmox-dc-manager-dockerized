@@ -1,0 +1,41 @@
+#!/command/with-contenv sh
+# Opt-in sshd. PDM_SSH_ENABLED=1 to run it; otherwise the service stays alive
+# but idle so s6 doesn't restart-loop us. We also require authorized_keys to
+# be present (init-pdm writes them from PDM_ROOT_SSH_KEYS) since the daemon is
+# configured for key-only root login — password auth is disabled in
+# /etc/ssh/sshd_config.d/00-pdm-hardening.conf.
+exec 2>&1
+set -e
+
+if [ "${PDM_SSH_ENABLED:-0}" != "1" ]; then
+  echo "[sshd] disabled (set PDM_SSH_ENABLED=1 in compose.yaml to enable)"
+  exec sleep infinity
+fi
+
+if [ ! -s /root/.ssh/authorized_keys ]; then
+  echo "[sshd] PDM_SSH_ENABLED=1 but /root/.ssh/authorized_keys is empty."
+  echo "[sshd] Set PDM_ROOT_SSH_KEYS in compose.yaml (newline-separated public keys)."
+  echo "[sshd] Refusing to start sshd — password auth is disabled in this image."
+  exec sleep infinity
+fi
+
+# Persist host keys to pdm-data so the host fingerprint survives `docker compose
+# up --force-recreate`. Without this, every recreate triggers
+# "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED" on every client.
+HOSTKEYS=/var/lib/proxmox-datacenter-manager/ssh
+mkdir -p "${HOSTKEYS}"
+chmod 0700 "${HOSTKEYS}"
+for kt in rsa ecdsa ed25519; do
+  src="${HOSTKEYS}/ssh_host_${kt}_key"
+  if [ ! -f "${src}" ]; then
+    echo "[sshd] generating ${kt} host key"
+    ssh-keygen -q -N '' -t "${kt}" -f "${src}" </dev/null
+  fi
+  install -m 0600 "${src}"     "/etc/ssh/ssh_host_${kt}_key"
+  install -m 0644 "${src}.pub" "/etc/ssh/ssh_host_${kt}_key.pub"
+done
+
+mkdir -p /run/sshd
+
+echo "[sshd] starting sshd on :22 (key-only root login)"
+exec /usr/sbin/sshd -D -e

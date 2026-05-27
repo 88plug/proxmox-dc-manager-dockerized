@@ -52,6 +52,13 @@ services:
       # Auto-regenerate the self-signed TLS cert when PDM_FQDN changes (1 = yes).
       # Operator-supplied CA-signed certs (subject != issuer) are NEVER touched.
       PDM_FORCE_REGEN_CERT: "0"
+      # Optional: ship a CA-signed cert without bind-mounting files. Both must
+      # be base64-encoded PEM and either both set or both empty. The pair is
+      # written to /etc/proxmox-datacenter-manager/auth/api.{pem,key} on every
+      # boot, overwriting whatever's there (intentional — env wins).
+      # Generate with:  base64 -w0 < fullchain.pem
+      PDM_TLS_CERT_B64: ""
+      PDM_TLS_KEY_B64:  ""
       # Mailto address written into access/user.cfg on first run.
       # Defaults to root@${PDM_FQDN} if empty.
       PDM_MAILTO: ""
@@ -60,11 +67,20 @@ services:
       #     ssh-ed25519 AAAA... user@host
       #     ssh-rsa AAAA... another@host
       PDM_ROOT_SSH_KEYS: ""
+      # Run an in-container sshd (key-only root login) gated on this flag.
+      # If 1, you also need PDM_ROOT_SSH_KEYS set AND a port mapping in `ports:`
+      # below (e.g. "2222:22/tcp"). Password auth is hard-disabled in the
+      # image; only public-key login works.
+      PDM_SSH_ENABLED: "0"
       # Container timezone.
       TZ: Etc/UTC
       PDM_TZ: Etc/UTC
     ports:
       - "8443:8443/tcp"
+      # Uncomment to expose the in-container sshd. Requires PDM_SSH_ENABLED=1
+      # and PDM_ROOT_SSH_KEYS populated. Choose a non-default host port to
+      # avoid clashing with the host's own sshd.
+      # - "2222:22/tcp"
     volumes:
       - pdm-config:/etc/proxmox-datacenter-manager
       - pdm-data:/var/lib/proxmox-datacenter-manager

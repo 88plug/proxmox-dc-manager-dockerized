@@ -5,17 +5,22 @@
 
 .PHONY: help build refresh up down restart logs shell init-shell \
         pdm-version set-password scan scan-register \
-        lint clean reset
+        lint verify cert-show journalctl backup restore \
+        smoke-test clean reset
 
 help: ## Show this help.
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
 build: ## Build the Docker image (extractor stage downloads the ISO automatically).
-	DOCKER_BUILDKIT=1 docker compose build
+	DOCKER_BUILDKIT=1 docker compose build \
+		--build-arg GIT_REVISION="$$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)" \
+		--build-arg BUILD_DATE="$$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 refresh: ## Cache-busted rebuild: re-pulls Debian Trixie security updates and re-runs dist-upgrade.
-	DOCKER_BUILDKIT=1 docker compose build --pull --no-cache
+	DOCKER_BUILDKIT=1 docker compose build --pull --no-cache \
+		--build-arg GIT_REVISION="$$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)" \
+		--build-arg BUILD_DATE="$$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 up: ## Start container in background.
 	docker compose up -d
@@ -63,6 +68,42 @@ scan-register: ## Scan + auto-register every remote into the running PDM.
 
 lint: ## Validate compose syntax.
 	docker compose config --quiet
+
+verify: ## Run hadolint + shellcheck + compose lint (best-effort; missing tools are skipped).
+	@if command -v hadolint >/dev/null; then hadolint Dockerfile; else echo "skip: hadolint not installed"; fi
+	@if command -v shellcheck >/dev/null; then \
+		find rootfs -type f \( -name '*.sh' -o -path '*/s6-rc.d/*/run' -o -path '*/s6-rc.d/*/up' \) -print0 \
+			| xargs -0 -r shellcheck -s sh -e SC1091; \
+	else echo "skip: shellcheck not installed"; fi
+	@docker compose config --quiet && echo "compose: ok"
+
+cert-show: ## Print TLS subject, SANs, and expiry from the running container.
+	@docker compose exec pdm openssl x509 -noout -subject -issuer -dates -ext subjectAltName \
+		-in /etc/proxmox-datacenter-manager/auth/api.pem
+
+journalctl: ## Live-tail the in-container systemd journal (Syslog UI source).
+	docker compose exec pdm journalctl -f
+
+backup: ## Tar both named volumes to ./pdm-backup-<timestamp>.tar.gz. Uses compose's volume bindings so it's robust to COMPOSE_PROJECT_NAME.
+	@ts=$$(date -u +%Y%m%dT%H%M%SZ); \
+	out="pdm-backup-$$ts.tar.gz"; \
+	docker compose run --rm --no-deps -v "$$PWD":/host --entrypoint sh pdm \
+		-c "tar czf /host/$$out -C / etc/proxmox-datacenter-manager var/lib/proxmox-datacenter-manager" \
+	&& echo "wrote $$out"
+
+restore: ## Restore both volumes from FILE=pdm-backup-<timestamp>.tar.gz. Container MUST be stopped.
+	@: $${FILE:?'usage: make restore FILE=pdm-backup-YYYYMMDDTHHMMSSZ.tar.gz'}
+	@test -f "$(FILE)" || { echo "no such file: $(FILE)"; exit 1; }
+	@if docker compose ps --status running --services 2>/dev/null | grep -q '^pdm$$'; then \
+		echo "refusing: pdm container is running. run 'make down' first."; exit 1; fi
+	docker compose run --rm --no-deps -v "$$PWD":/host:ro --entrypoint sh pdm \
+		-c 'rm -rf /etc/proxmox-datacenter-manager/* /var/lib/proxmox-datacenter-manager/* && tar xzf "/host/$(FILE)" -C /'
+	@echo "restored. run 'make up' to start."
+
+smoke-test: ## End-to-end smoke test. Needs PVE_HOST, PVE_PASS env vars.
+	@: $${PVE_HOST:?'usage: make smoke-test PVE_HOST=192.168.1.10 PVE_PASS=... [PVE_USER=root@pam]'}
+	@: $${PVE_PASS:?'usage: make smoke-test PVE_HOST=... PVE_PASS=...'}
+	scripts/smoke-test.sh
 
 clean: ## Remove image (keep volumes).
 	docker compose down --rmi local

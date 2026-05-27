@@ -90,6 +90,48 @@ for op in 'chown www-data:www-data '"${CONF_DIR}"' '"${DATA_DIR}" \
   fi
 done
 
+# --- 4.4 Optional: install TLS material from env vars -------------------------
+# PDM_TLS_CERT_B64 / PDM_TLS_KEY_B64 let operators ship a pre-existing
+# certificate (e.g. wildcard from their internal CA, ACME-issued cert minted
+# by an outer reverse proxy) without bind-mounting files into the volume.
+# Both must be base64-encoded PEM. We only write the files if BOTH are set
+# AND non-empty; partial values are rejected to avoid leaving the volume in
+# a half-broken state. Once written, the FQDN consistency check below will
+# see subject != issuer (CA-signed) and leave the cert alone.
+TLS_DIR="${CONF_DIR}/auth"
+if [ -n "${PDM_TLS_CERT_B64:-}" ] || [ -n "${PDM_TLS_KEY_B64:-}" ]; then
+  if [ -z "${PDM_TLS_CERT_B64:-}" ] || [ -z "${PDM_TLS_KEY_B64:-}" ]; then
+    warn "PDM_TLS_CERT_B64 and PDM_TLS_KEY_B64 must BOTH be set; refusing partial install."
+    exit 1
+  fi
+  install -d -m 01770 -o www-data -g www-data "${TLS_DIR}"
+  tmp_cert="$(mktemp)"; tmp_key="$(mktemp)"
+  trap 'rm -f "${tmp_cert}" "${tmp_key}"' EXIT
+  if ! printf '%s' "${PDM_TLS_CERT_B64}" | base64 -d > "${tmp_cert}" 2>/dev/null; then
+    warn "PDM_TLS_CERT_B64 is not valid base64"; exit 1
+  fi
+  if ! printf '%s' "${PDM_TLS_KEY_B64}"  | base64 -d > "${tmp_key}"  2>/dev/null; then
+    warn "PDM_TLS_KEY_B64 is not valid base64"; exit 1
+  fi
+  if ! openssl x509 -in "${tmp_cert}" -noout >/dev/null 2>&1; then
+    warn "PDM_TLS_CERT_B64 does not decode to a valid PEM certificate"; exit 1
+  fi
+  if ! openssl pkey -in "${tmp_key}" -noout >/dev/null 2>&1; then
+    warn "PDM_TLS_KEY_B64 does not decode to a valid PEM private key"; exit 1
+  fi
+  # Verify cert/key match by comparing public key digests.
+  cert_pub="$(openssl x509 -in "${tmp_cert}" -pubkey -noout | openssl sha256)"
+  key_pub="$(openssl pkey -in "${tmp_key}" -pubout 2>/dev/null | openssl sha256)"
+  if [ "${cert_pub}" != "${key_pub}" ]; then
+    warn "PDM_TLS_CERT_B64 and PDM_TLS_KEY_B64 don't match (different public keys)"; exit 1
+  fi
+  install -m 0640 -o root -g www-data "${tmp_cert}" "${TLS_DIR}/api.pem"
+  install -m 0640 -o root -g www-data "${tmp_key}"  "${TLS_DIR}/api.key"
+  rm -f "${tmp_cert}" "${tmp_key}"
+  trap - EXIT
+  log "wrote TLS material from PDM_TLS_{CERT,KEY}_B64 to ${TLS_DIR}/api.{pem,key}"
+fi
+
 # --- 4.5 TLS cert / FQDN consistency check -----------------------------------
 # If the existing self-signed cert's CN/SAN don't match PDM_FQDN, browsers will
 # warn about a hostname mismatch. Auto-rotate ONLY for self-signed certs (subject
