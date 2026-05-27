@@ -22,6 +22,12 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  schedule:
+    # Sunday 03:17 UTC. Weekly cache-busted rebuild that re-pulls
+    # `debian:trixie-slim` and re-runs `apt-get dist-upgrade`, so the
+    # `:edge` tag tracks current Debian Trixie security state without
+    # waiting for a maintainer push.
+    - cron: '17 3 * * 0'
 
 env:
   REGISTRY: ghcr.io
@@ -69,6 +75,8 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
+            type=schedule,pattern=edge
+            type=schedule,pattern=weekly-{{date 'YYYYMMDD'}}
             type=sha,format=short
 
       - name: Resolve build args
@@ -96,8 +104,43 @@ jobs:
             BUILD_DATE=${{ steps.args.outputs.build_date }}
           provenance: mode=max
           sbom: true
+          # Scheduled runs bust the cache so Debian dist-upgrade actually
+          # picks up new packages instead of replaying the cached layer.
+          no-cache: ${{ github.event_name == 'schedule' }}
+          pull: ${{ github.event_name == 'schedule' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Smoke test: boot the just-built image, wait for the s6 services to
+      # come up, and confirm the API is serving /api2/json/ping. Catches
+      # boot-time regressions (init-pdm crashes, healthcheck mismatches,
+      # broken s6 dependency graphs) without needing a real PVE.
+      - name: Smoke test
+        if: github.event_name == 'pull_request'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          IMAGE=$(printf '%s\n' "$TAGS" | head -n1)
+          docker run -d --rm --name pdm-smoke \
+            -e PDM_ROOT_PASSWORD=ci-only-smoke \
+            -p 18443:8443 \
+            "$IMAGE"
+          trap 'docker logs pdm-smoke >&2 || true; docker rm -f pdm-smoke >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 60); do
+            if curl -fsSk https://127.0.0.1:18443/api2/json/ping >/dev/null 2>&1; then
+              echo "smoke: API ping ok after ${i}s"
+              break
+            fi
+            sleep 1
+            if [ "$i" = "60" ]; then
+              echo "smoke: API ping never succeeded" >&2
+              exit 1
+            fi
+          done
+          # Reachability of static UI (separate code path).
+          curl -fsSk https://127.0.0.1:18443/ >/dev/null
+          echo "smoke: static UI ok"
 
       - name: Sign image with Cosign (keyless)
         if: github.event_name != 'pull_request'

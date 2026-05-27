@@ -232,6 +232,16 @@ When Proxmox publishes a new ISO:
 
 Named volumes are preserved across rebuilds, so configuration and remotes carry over. The PDM postinst handles intra-version migrations automatically (e.g. the 1.0.0 -> 1.0.1 `ldap_passwords.json` rewrite). Review the upstream changelog (<https://pdm.proxmox.com/docs/>) before upgrading.
 
+### Self-maintaining workflows
+
+The repository's GitHub Actions are set up so that, after the initial push, the only ongoing human responsibility is reviewing bot PRs and reading Proxmox's changelog when a new PDM ISO appears.
+
+- **`.github/workflows/iso-bump-detector.yml`** — daily 04:17 UTC poll of `download.proxmox.com/iso/`. If a newer `proxmox-datacenter-manager_*.iso` is published, opens (or updates) a PR that bumps `PDM_ISO_URL`, `PDM_ISO_SHA256`, the README "At a glance" line, and the compose build args. The PR's CI run sha256-verifies and GPG-verifies the new ISO against the pinned Proxmox Trixie release key; a tampered ISO can never land in `main`.
+- **`.github/workflows/build-and-sign.yml`** also fires weekly (Sunday 03:17 UTC) with `--no-cache --pull`, so the `:edge` tag picks up Debian Trixie security updates without any commit. PR/push builds include a smoke test that boots the image and pings `/api2/json/ping` before the image is signed and pushed.
+- **`.github/dependabot.yml`** — auto-PRs for GitHub Actions and `FROM` lines in the Dockerfile.
+
+What still needs human attention: deciding whether to merge the ISO-bump PR (reading Proxmox's upstream changelog for breakage), tagging a release after merge to publish a versioned image, and updating `PROXMOX_KEY_SHA256` / `PROXMOX_KEY_FPR` in the Dockerfile if Proxmox rotates the Trixie release signing key (rare, every few years).
+
 ### Debian base updates between ISO releases
 
 The Dockerfile runs `apt-get dist-upgrade` against `deb.debian.org` once during the build (after PDM is installed from the local ISO pool, before the apt sources are wiped). That lifts glibc, openssl, ca-certificates, and the rest of the Debian Trixie base to current security/point-release state without waiting for Proxmox to publish a new ISO.

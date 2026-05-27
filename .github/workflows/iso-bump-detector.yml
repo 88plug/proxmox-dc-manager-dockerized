@@ -1,0 +1,153 @@
+name: iso-bump-detector
+
+# Polls download.proxmox.com daily for a newer Proxmox Datacenter Manager
+# ISO. If one is found, opens (or updates) a PR that:
+#   - bumps PDM_ISO_URL + PDM_ISO_SHA256 in Dockerfile and compose.yaml
+#   - bumps the version + sha256 line in README.md's "At a glance" block
+#   - leaves OCI version label / release tag alone (deliberate — that's the
+#     maintainer's call when they tag a release)
+#
+# We deliberately do NOT download the 1.4 GB ISO here — we only need the
+# .sha256 sidecar to populate the pin. The PR's CI run will pull the ISO,
+# sha256-verify it AND gpgv-verify it against the pinned Proxmox release
+# key, so a tampered sidecar can never land in main without failing CI.
+
+on:
+  schedule:
+    - cron: '17 4 * * *'   # daily 04:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect newest published ISO
+        id: detect
+        run: |
+          set -euo pipefail
+
+          # Current pin from Dockerfile (single source of truth).
+          current_url=$(grep -oE 'PDM_ISO_URL=[^[:space:]]+' Dockerfile | head -1 | cut -d= -f2)
+          current_iso=$(basename "$current_url")
+          current_ver=$(echo "$current_iso" | sed -E 's/^proxmox-datacenter-manager_(.*)\.iso$/\1/')
+          current_sha=$(grep -oE 'PDM_ISO_SHA256=[a-f0-9]+' Dockerfile | head -1 | cut -d= -f2)
+
+          # Fetch the directory listing and extract every PDM ISO filename.
+          listing=$(curl -fsSL http://download.proxmox.com/iso/)
+          latest_iso=$(printf '%s\n' "$listing" \
+            | grep -oE 'proxmox-datacenter-manager_[0-9]+\.[0-9]+-[0-9]+\.iso' \
+            | sort -uV | tail -n1 || true)
+
+          if [ -z "$latest_iso" ]; then
+            echo "could not parse any PDM ISO from listing — listing format may have changed" >&2
+            exit 0
+          fi
+
+          latest_ver=$(echo "$latest_iso" | sed -E 's/^proxmox-datacenter-manager_(.*)\.iso$/\1/')
+
+          echo "current_iso=$current_iso"
+          echo "latest_iso=$latest_iso"
+
+          if [ "$current_iso" = "$latest_iso" ]; then
+            echo "up-to-date: $current_iso"
+            echo "needs_bump=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Sanity: refuse to "downgrade" if Proxmox unpublishes a newer ISO
+          # and our pin is somehow newer than the listing's max.
+          if [ "$(printf '%s\n%s\n' "$current_ver" "$latest_ver" | sort -V | tail -n1)" = "$current_ver" ]; then
+            echo "current pin ($current_ver) is >= latest published ($latest_ver) — not bumping" >&2
+            echo "needs_bump=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Fetch the published sha256 sidecar (one line: "<sha>  <name>").
+          new_sha=$(curl -fsSL "http://download.proxmox.com/iso/${latest_iso}.sha256" | awk '{print $1; exit}')
+          if [ -z "$new_sha" ] || [ "${#new_sha}" != "64" ]; then
+            echo "sidecar returned unexpected sha256: $new_sha" >&2
+            exit 1
+          fi
+
+          # Verify the .asc sidecar exists so the build step can GPG-verify.
+          if ! curl -fsSI "http://download.proxmox.com/iso/${latest_iso}.asc" >/dev/null; then
+            echo "no .asc sidecar for ${latest_iso} — refusing to bump (build's GPG verify would fail)" >&2
+            exit 1
+          fi
+
+          echo "needs_bump=true"          >> "$GITHUB_OUTPUT"
+          echo "current_iso=$current_iso" >> "$GITHUB_OUTPUT"
+          echo "current_ver=$current_ver" >> "$GITHUB_OUTPUT"
+          echo "current_sha=$current_sha" >> "$GITHUB_OUTPUT"
+          echo "latest_iso=$latest_iso"   >> "$GITHUB_OUTPUT"
+          echo "latest_ver=$latest_ver"   >> "$GITHUB_OUTPUT"
+          echo "new_sha=$new_sha"         >> "$GITHUB_OUTPUT"
+
+      - name: Apply pin bump to repo
+        if: steps.detect.outputs.needs_bump == 'true'
+        env:
+          CURRENT_ISO: ${{ steps.detect.outputs.current_iso }}
+          CURRENT_SHA: ${{ steps.detect.outputs.current_sha }}
+          LATEST_ISO:  ${{ steps.detect.outputs.latest_iso }}
+          NEW_SHA:     ${{ steps.detect.outputs.new_sha }}
+        run: |
+          set -euo pipefail
+          # ISO filename swap in every file that pins it.
+          for f in Dockerfile compose.yaml README.md; do
+            sed -i "s|${CURRENT_ISO}|${LATEST_ISO}|g" "$f"
+          done
+          # sha256 swap (Dockerfile uses =, compose uses :, README uses backticks).
+          sed -i "s|PDM_ISO_SHA256=${CURRENT_SHA}|PDM_ISO_SHA256=${NEW_SHA}|"  Dockerfile
+          sed -i "s|PDM_ISO_SHA256: ${CURRENT_SHA}|PDM_ISO_SHA256: ${NEW_SHA}|" compose.yaml
+          sed -i "s|\`${CURRENT_SHA}\`|\`${NEW_SHA}\`|"                         README.md
+          # Show the diff in the workflow log for auditability.
+          git --no-pager diff -- Dockerfile compose.yaml README.md
+
+      - name: Open / update PR
+        if: steps.detect.outputs.needs_bump == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: bot/iso-bump-${{ steps.detect.outputs.latest_ver }}
+          base: main
+          title: "chore: bump PDM ISO ${{ steps.detect.outputs.current_ver }} → ${{ steps.detect.outputs.latest_ver }}"
+          commit-message: |
+            chore: bump PDM ISO ${{ steps.detect.outputs.current_ver }} → ${{ steps.detect.outputs.latest_ver }}
+
+            Auto-detected by .github/workflows/iso-bump-detector.yml.
+            New sha256: ${{ steps.detect.outputs.new_sha }}
+          body: |
+            Auto-detected newer Proxmox Datacenter Manager ISO on
+            `download.proxmox.com`.
+
+            | Field        | Old                                                    | New                                                    |
+            | ------------ | ------------------------------------------------------ | ------------------------------------------------------ |
+            | ISO filename | `${{ steps.detect.outputs.current_iso }}` | `${{ steps.detect.outputs.latest_iso }}` |
+            | sha256       | `${{ steps.detect.outputs.current_sha }}` | `${{ steps.detect.outputs.new_sha }}` |
+
+            **Before merging, do the human-only steps the bot can't:**
+
+            1. Read Proxmox's upstream changelog for the new release.
+            2. Check whether anything in `rootfs/` overlays files that
+               might collide or no-op with the new ISO's squashfs
+               (e.g., new systemd units, renamed binaries).
+            3. Decide whether to bump `org.opencontainers.image.version`
+               in `Dockerfile` and tag a release after merge.
+
+            CI will sha256-verify *and* GPG-verify the new ISO against the
+            pinned Proxmox Trixie release key before any image is built or
+            pushed, so this PR cannot land a tampered ISO. If the build
+            fails, that's a signal that the sidecar disagrees with the ISO
+            (likely a Proxmox-side re-spin in flight) — wait and re-run.
+          labels: |
+            dependencies
+            iso-bump
+          delete-branch: true
+          sign-commits: false

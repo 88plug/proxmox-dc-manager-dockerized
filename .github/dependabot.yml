@@ -1,0 +1,37 @@
+version: 2
+updates:
+  # Pin minor/patch bumps on every GitHub Action we use. Major bumps stay
+  # behind so an action's new release doesn't auto-break the workflow.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '04:00'
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: ci
+
+  # Watch FROM lines in Dockerfile (currently only `debian:trixie-slim` in
+  # the extractor stage). When Debian publishes a Trixie point release that
+  # changes the slim digest, this opens a PR. The runtime image isn't a
+  # FROM <registry>/<image>; it's FROM pdm-base (our scratch-based stage),
+  # so it's not auto-tracked — that's intentional. Runtime base updates
+  # come from the dist-upgrade step on every build.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '04:30'
+      timezone: Etc/UTC
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - docker
+    commit-message:
+      prefix: build
