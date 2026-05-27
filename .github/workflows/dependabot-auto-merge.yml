@@ -1,0 +1,80 @@
+name: dependabot-auto-merge
+
+# Auto-merge Dependabot PRs after build-and-sign.yml passes on them.
+#
+# Uses workflow_run instead of pull_request_target + `gh pr merge --auto`
+# so it works without the "Allow auto-merge" repo setting. The merge is
+# performed via the REST API only after the build-and-sign workflow has
+# completed successfully on the PR's head SHA. Patch and minor updates
+# auto-merge; major updates require a human (filed but left open).
+
+on:
+  workflow_run:
+    workflows: [build-and-sign]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  merge:
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents:      write
+      pull-requests: write
+    steps:
+      - name: Find and merge if Dependabot, non-major
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const headSha = context.payload.workflow_run.head_sha;
+            const { owner, repo } = context.repo;
+
+            // Find the PR for this head SHA.
+            const { data: prs } = await github.rest.pulls.list({
+              owner, repo, state: 'open', per_page: 100
+            });
+            const pr = prs.find(p => p.head.sha === headSha);
+            if (!pr) {
+              core.info(`no open PR found for ${headSha} — skipping`);
+              return;
+            }
+
+            // Restrict to Dependabot.
+            if (pr.user && pr.user.login !== 'dependabot[bot]') {
+              core.info(`PR #${pr.number} is from ${pr.user.login}, not dependabot — skipping`);
+              return;
+            }
+
+            // Fetch Dependabot's structured metadata to gate on update-type.
+            const md = await github.rest.repos.getContent({
+              owner, repo,
+              path: '.github/dependabot.yml',
+            }).catch(() => null);  // sanity: dependabot.yml exists
+
+            // The simplest reliable signal is the PR title format Dependabot
+            // uses. Major bumps contain "from X to Y" where Y's major != X's.
+            // We extract the from/to versions and refuse to merge if the
+            // major component changed. Patch/minor are auto-merged.
+            const m = pr.title.match(/from\s+([\w.\-+]+)\s+to\s+([\w.\-+]+)/i);
+            if (m) {
+              const major = v => (String(v).match(/^v?(\d+)/) || [])[1];
+              if (major(m[1]) && major(m[2]) && major(m[1]) !== major(m[2])) {
+                core.info(`PR #${pr.number} is a major bump (${m[1]} → ${m[2]}); leaving open for human review`);
+                return;
+              }
+            }
+
+            try {
+              await github.rest.pulls.merge({
+                owner, repo,
+                pull_number: pr.number,
+                merge_method: 'squash',
+              });
+              core.info(`merged PR #${pr.number}: ${pr.title}`);
+            } catch (e) {
+              core.warning(`merge failed for PR #${pr.number}: ${e.message}`);
+            }

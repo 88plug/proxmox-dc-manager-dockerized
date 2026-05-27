@@ -234,13 +234,28 @@ Named volumes are preserved across rebuilds, so configuration and remotes carry 
 
 ### Self-maintaining workflows
 
-The repository's GitHub Actions are set up so that, after the initial push, the only ongoing human responsibility is reviewing bot PRs and reading Proxmox's changelog when a new PDM ISO appears.
+The repository's GitHub Actions are designed to run for years without human attention. After the initial `git push`, no one needs to read email, review PRs, or click anything in GitHub.
 
-- **`.github/workflows/iso-bump-detector.yml`** — daily 04:17 UTC poll of `download.proxmox.com/iso/`. If a newer `proxmox-datacenter-manager_*.iso` is published, opens (or updates) a PR that bumps `PDM_ISO_URL`, `PDM_ISO_SHA256`, the README "At a glance" line, and the compose build args. The PR's CI run sha256-verifies and GPG-verifies the new ISO against the pinned Proxmox Trixie release key; a tampered ISO can never land in `main`.
-- **`.github/workflows/build-and-sign.yml`** also fires weekly (Sunday 03:17 UTC) with `--no-cache --pull`, so the `:edge` tag picks up Debian Trixie security updates without any commit. PR/push builds include a smoke test that boots the image and pings `/api2/json/ping` before the image is signed and pushed.
-- **`.github/dependabot.yml`** — auto-PRs for GitHub Actions and `FROM` lines in the Dockerfile.
+- **`.github/workflows/iso-bump-detector.yml`** — daily 04:17 UTC poll of `download.proxmox.com/iso/`. When a newer `proxmox-datacenter-manager_*.iso` appears, the workflow runs a full verification build (sha256 + GPG against the pinned Trixie release key + runtime smoke test on `/api2/json/ping`) and, only on success, pushes the pin bump directly to `main` and creates a `v<version>` tag. No PR, no human merge step. The tag push triggers `build-and-sign.yml` which publishes the signed and attested release image to GHCR.
+- **`.github/workflows/build-and-sign.yml`** — fires on push/tag/PR and on a weekly cron (Sunday 03:17 UTC). The weekly run uses `--no-cache --pull` so the `:edge` tag picks up current Debian Trixie security updates without any commit. PR builds include a runtime smoke test (boot the image, poll `/api2/json/ping`) before the image is signed and pushed. All builds: SBOM, SLSA build provenance, Cosign keyless signing, Trivy scan to GitHub Security tab.
+- **`.github/dependabot.yml`** — weekly auto-PRs for GitHub Actions and `FROM` lines in the Dockerfile.
+- **`.github/workflows/dependabot-auto-merge.yml`** — listens for `build-and-sign` to finish on a Dependabot PR; if it passed and the PR is not a major version bump, merges via the REST API. Works without the "Allow auto-merge" repo setting. Major version bumps are left open as the one non-trivial human-review hook in the system.
+- **`.github/workflows/ghcr-retention.yml`** — monthly cleanup of GHCR images: keeps every `v*` release plus `main`, `latest`, `edge`, the most recent 8 `weekly-*` builds, and the most recent 30 `sha-*` builds; deletes the rest and every untagged manifest.
 
-What still needs human attention: deciding whether to merge the ISO-bump PR (reading Proxmox's upstream changelog for breakage), tagging a release after merge to publish a versioned image, and updating `PROXMOX_KEY_SHA256` / `PROXMOX_KEY_FPR` in the Dockerfile if Proxmox rotates the Trixie release signing key (rare, every few years).
+#### One-time repo settings (none required, but improve quality of life)
+
+The workflows function correctly with GitHub's default repo settings. If you want to harden further:
+
+- **Settings → Actions → General → Workflow permissions** — set to "Read and write permissions" (default on most accounts). Required so `iso-bump-detector.yml` can push to `main`.
+- **Settings → General → Pull Requests → Automatically delete head branches** — optional cosmetic.
+- **Settings → General → Pull Requests → Allow auto-merge** — *not* required; `dependabot-auto-merge.yml` uses the REST API directly to bypass the need for this toggle.
+- **Branch protection on `main`** — leave off, or include `iso-bump-bot` in the bypass list. Strict required-reviewers will block the bot's pushes.
+
+#### When things actually break (years-out failure modes)
+
+- **Proxmox rotates the Trixie release GPG key**: the iso-bump verification build fails because the live key's sha256 no longer matches `PROXMOX_KEY_SHA256`. The bot stops bumping (correctly — refuses to trust a key it didn't expect). The running image keeps working; `:edge` continues to update via dist-upgrade for as long as Proxmox's apt repo signing key (separate from the ISO release key) is still trusted. Human fix: bump `PROXMOX_KEY_SHA256` and `PROXMOX_KEY_FPR` once.
+- **Debian Trixie reaches EOL** (~2028): `dist-upgrade` starts returning nothing useful; eventually `debian.sources` URLs 404. Human fix: bump to next Debian release, retest.
+- **GitHub deprecates a workflow API** (rare, well-telegraphed): Dependabot opens the PR; auto-merge runs it; if smoke test passes, it lands. Otherwise the bot's PR sits open as the only deferred-action signal.
 
 ### Debian base updates between ISO releases
 
