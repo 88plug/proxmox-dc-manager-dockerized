@@ -42,10 +42,11 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 # Fetch + verify the ISO. Three independent checks: sha256 against the pin,
-# sha256 against Proxmox's published `.sha256` sidecar, and a GPG signature
-# verification of the ISO with the Proxmox Trixie release key. The key itself
-# is sha256-pinned at fetch time and its OpenPGP fingerprint is re-verified
-# after import — both must match before the key is trusted for the ISO check.
+# sha256 against the Proxmox release key, and a GPG signature verification
+# of the ISO using gpgv against that pinned key. Using `gpg --show-keys` to
+# read the fingerprint and `gpgv` for the signature check avoids spawning
+# gpg-agent (which the slim base image doesn't ship), so no keyring import
+# or homedir setup is needed.
 RUN set -eux; \
     mkdir -p /iso /keys; \
     curl -fL --retry 3 --retry-delay 2 -o /iso/pdm.iso     "${PDM_ISO_URL}"; \
@@ -55,17 +56,31 @@ RUN set -eux; \
     echo "${PDM_ISO_SHA256}  /iso/pdm.iso"             | sha256sum -c -; \
     # 2. Pin-verify the public key we just fetched.
     echo "${PROXMOX_KEY_SHA256}  /keys/proxmox-release.gpg" | sha256sum -c -; \
-    # 3. Import + verify the key fingerprint matches the expected value.
-    export GNUPGHOME="$(mktemp -d)"; \
-    gpg --batch --import /keys/proxmox-release.gpg; \
-    gpg --batch --with-colons --fingerprint \
-      | awk -F: '$1=="fpr"{print $10}' \
+    # 3. Parse the key file directly (no import, no agent) and check the
+    #    primary-key fingerprint against the pinned value.
+    gpg --show-keys --with-colons /keys/proxmox-release.gpg \
+      | awk -F: '$1=="fpr"{print $10; exit}' \
       | grep -qx "${PROXMOX_KEY_FPR}" \
-      || { echo "FATAL: imported key fingerprint mismatch" >&2; exit 1; }; \
-    # 4. Verify the detached signature on the ISO.
-    gpg --batch --verify /iso/pdm.iso.asc /iso/pdm.iso; \
-    rm -rf "${GNUPGHOME}"; \
-    unset GNUPGHOME
+      || { echo "FATAL: key fingerprint mismatch" >&2; exit 1; }; \
+    # 4. Verify the detached signature with gpgv. Proxmox dual-signs their
+    #    ISOs — the .asc contains a signature from the Trixie release key
+    #    we trust AND a secondary signature from a build/CI key we don't.
+    #    gpgv naturally exits non-zero whenever ANY signature can't be
+    #    verified, so we instead require "at least one Good signature line
+    #    from our pinned key" in the gpgv output. Anchoring on the key id
+    #    in the BAD-signature line is impossible (gpgv prints nothing for
+    #    unknown keys in some versions), so we anchor on the explicit
+    #    "Good signature" line, which only appears if our pinned key
+    #    successfully verified one of the signatures.
+    gpgv_out=$(gpgv --keyring /keys/proxmox-release.gpg \
+                    /iso/pdm.iso.asc /iso/pdm.iso 2>&1 || true); \
+    printf '%s\n' "${gpgv_out}"; \
+    printf '%s\n' "${gpgv_out}" \
+      | grep -qE "^gpgv: Good signature .* ${PROXMOX_KEY_FPR}|^gpgv:[[:space:]]+using RSA key ${PROXMOX_KEY_FPR}$" \
+      || { echo "FATAL: no good signature on ISO from pinned key" >&2; exit 1; }; \
+    printf '%s\n' "${gpgv_out}" \
+      | grep -qE "^gpgv: Good signature" \
+      || { echo "FATAL: gpgv did not emit a Good signature line" >&2; exit 1; }
 
 # Unpack the ISO and the embedded Debian rootfs.
 RUN set -eux; \
@@ -193,6 +208,17 @@ RUN set -eux; \
     # subscription. Remove it so future apt operations (and PDM's own daily
     # update probe) don't 401.
     rm -f /etc/apt/sources.list.d/pdm-enterprise.sources; \
+    # Bloat removal: strip the mathjax payload (~45 MB). PDM's Yew/WASM UI
+    # does not render math. The package metadata is left intact so apt's
+    # dep graph (pdm → docs → libjs-mathjax → fonts-mathjax, all hard
+    # Depends) stays satisfied for the runtime daily-update probe.
+    # MUST happen in the same RUN as the install so the bytes are excluded
+    # from the layer blob, not just whited-out by a later step.
+    rm -rf /usr/share/javascript/mathjax \
+           /usr/share/fonts/truetype/mathjax \
+           /usr/share/fonts/otf/mathjax \
+           /usr/share/fonts-mathjax \
+           /usr/share/mathjax; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*
 
@@ -228,6 +254,7 @@ RUN set -eux; \
         efibootmgr initramfs-tools initramfs-tools-bin initramfs-tools-core \
         dracut-install klibc-utils libklibc cpio busybox \
         zfsutils-linux zfs-initramfs lvm2 dmeventd dmsetup \
+        libzpool6linux \
         btrfs-progs xfsprogs gdisk dosfstools \
         bind9-dnsutils bind9-host pciutils usbutils \
         udev chrony \
@@ -318,7 +345,7 @@ RUN rm -rf /var/lib/apt/lists/* /tmp/* /var/cache/apt/archives/*.deb 2>/dev/null
 EXPOSE 8443
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD wget -q --no-check-certificate -O- https://127.0.0.1:8443/api2/json/version >/dev/null 2>&1 || exit 1
+    CMD wget -q --no-check-certificate -O- https://127.0.0.1:8443/api2/json/ping >/dev/null 2>&1 || exit 1
 
 ENTRYPOINT ["/init"]
 

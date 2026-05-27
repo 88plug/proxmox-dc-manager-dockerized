@@ -16,6 +16,7 @@ The build extracts the squashfs root and apt repository from the official PDM IS
 - Architecture: `linux/amd64` only (PDM has no upstream arm64 build)
 - ISO: `proxmox-datacenter-manager_1.0-2.iso` (PDM 1.0.2, ISO Refresh 2025-12-10), 1.37 GB
   - sha256 `b4b98ed3e8f4dabb1151ebb713d6e7109aeba00d95b88bf65f954dd9ef1e89e1`
+  - GPG-signed by `24B30F06ECC1836A4E5EFECBA7BCD1420BFE778E` (Proxmox Trixie Release Key); the build verifies the detached signature with gpgv before unpacking
 
 ## Quickstart
 
