@@ -1,0 +1,16 @@
+#!/command/with-contenv sh
+set -e
+i=0
+while [ ! -S /run/proxmox-datacenter-manager/priv.sock ]; do
+  i=$((i+1))
+  if [ $i -gt 60 ]; then
+    echo "[api] timeout waiting for priv.sock" >&2
+    exit 1
+  fi
+  sleep 0.5
+done
+exec 2>&1
+# The api daemon does NOT self-drop privs; it checks at startup that it is
+# already running as www-data:www-data and aborts otherwise. Mirror what the
+# upstream systemd unit does (User=www-data, Group=www-data).
+exec s6-setuidgid www-data /usr/libexec/proxmox/proxmox-datacenter-api

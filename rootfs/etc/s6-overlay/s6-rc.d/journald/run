@@ -1,0 +1,8 @@
+#!/command/with-contenv sh
+exec 2>&1
+mkdir -p /run/systemd/journal /run/log/journal
+# /dev/log is the BSD syslog datagram socket; symlink to journald's
+# equivalent so any logger(1) / Python SysLogHandler / PDM future code
+# path that opens /dev/log just works.
+ln -sf /run/systemd/journal/dev-log /dev/log
+exec /lib/systemd/systemd-journald

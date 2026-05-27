@@ -1,0 +1,21 @@
+#!/command/with-contenv sh
+# Tail PDM's own access/auth log files into the container's stdout under
+# prefixes so `docker logs` ships them. tail -F handles PDM's internal
+# rotation (truncate-and-recreate) cleanly.
+exec 2>&1
+LOG_DIR=/var/log/proxmox-datacenter-manager
+mkdir -p "$LOG_DIR/api"
+# Pre-create files so tail -F has something to open at boot. Forwarder runs
+# as root; chown to www-data so the api daemon (www-data) can write into them.
+for f in "$LOG_DIR/api/access.log" "$LOG_DIR/api/auth.log"; do
+  : >> "$f"
+  chown www-data:www-data "$f" 2>/dev/null || true
+  chmod 0640 "$f" 2>/dev/null || true
+done
+# Two unbuffered (sed -u) pipelines run in parallel. Single-file tail avoids
+# the `==> file <==` header-tagging dance, and `sed -u` flushes per line so
+# events appear in `docker logs` immediately rather than waiting for tail's
+# 4 KB pipe buffer.
+tail -n 0 -F "$LOG_DIR/api/access.log" 2>/dev/null | sed -u 's/^/[pdm-access] /' &
+tail -n 0 -F "$LOG_DIR/api/auth.log"   2>/dev/null | sed -u 's/^/[pdm-auth] /'   &
+wait

@@ -1,0 +1,12 @@
+#!/command/execlineb -P
+with-contenv
+fdmove -c 2 1
+foreground { mkdir -p /run/proxmox-datacenter-manager }
+foreground { chown root:www-data /run/proxmox-datacenter-manager }
+foreground { chmod 01770 /run/proxmox-datacenter-manager }
+# Replicates systemd's ExecStartPre. With plain `if { ... }` execlineb
+# terminates the chain (exit 100) on a non-zero setup, surfacing the failure
+# in `docker logs` instead of silently degrading the daemon. (Earlier `-n -t`
+# variant inverted the test — successful setup killed the chain.)
+if { /usr/libexec/proxmox/proxmox-datacenter-privileged-api setup }
+exec /usr/libexec/proxmox/proxmox-datacenter-privileged-api

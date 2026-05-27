@@ -1,0 +1,9 @@
+# Stub interfaces file for PDM in Docker.
+# This file is intentionally minimal — Docker manages the container's
+# networking, and edits made via the PDM Network panel are NOT applied
+# (there is no ifupdown / ifreload service running). The PDM panel will
+# display only the loopback interface here; the real interface (eth0) is
+# created by Docker at runtime.
+
+auto lo
+iface lo inet loopback

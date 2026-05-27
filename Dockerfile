@@ -1,0 +1,256 @@
+# syntax=docker/dockerfile:1.7
+#
+# Proxmox Datacenter Manager (PDM) — Dockerized (all-in-one)
+# Self-contained build: the extractor stage downloads the official Proxmox
+# Datacenter Manager ISO and unpacks it. No host-side prep, no .iso-work,
+# no separate `make get-iso` step. `docker compose up --build` and you're done.
+#
+# Layer caching: the ISO download lands in its own RUN, so Docker caches the
+# 1.4 GB blob across rebuilds — a clean rebuild only re-downloads if the
+# pinned URL or sha256 changes.
+#
+# Stages:
+#   1. extractor — fetches the ISO, extracts pdm-base.squashfs + apt pool
+#   2. pdm-base  — scratch image populated from the extracted Debian rootfs
+#   3. final     — installs PDM from the local pool and layers s6-overlay
+#
+
+# ===========================================================================
+# Stage 1: extractor — fetch the ISO and unpack the embedded squashfs rootfs.
+# ===========================================================================
+FROM debian:trixie-slim AS extractor
+
+ARG PDM_ISO_URL=http://download.proxmox.com/iso/proxmox-datacenter-manager_1.0-2.iso
+ARG PDM_ISO_SHA256=b4b98ed3e8f4dabb1151ebb713d6e7109aeba00d95b88bf65f954dd9ef1e89e1
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        squashfs-tools \
+        libarchive-tools \
+    ; \
+    rm -rf /var/lib/apt/lists/*
+
+# Fetch + verify the ISO. Cached as its own layer so subsequent builds reuse
+# it without redownloading 1.4 GB.
+RUN set -eux; \
+    mkdir -p /iso; \
+    curl -fL --retry 3 --retry-delay 2 -o /iso/pdm.iso "${PDM_ISO_URL}"; \
+    echo "${PDM_ISO_SHA256}  /iso/pdm.iso" | sha256sum -c -
+
+# Unpack the ISO and the embedded Debian rootfs.
+RUN set -eux; \
+    mkdir -p /tmp/iso /tmp/rootfs; \
+    bsdtar -xf /iso/pdm.iso -C /tmp/iso; \
+    test -f /tmp/iso/pdm-base.squashfs; \
+    unsquashfs -f -d /tmp/rootfs -no-progress -no-xattrs \
+        /tmp/iso/pdm-base.squashfs || true; \
+    # Sanity: the squashfs unpack must produce a valid Debian rootfs.
+    test -f /tmp/rootfs/etc/os-release; \
+    test -d /tmp/rootfs/usr/bin; \
+    # Copy the on-ISO apt pool into the rootfs so the next stage can install
+    # PDM offline via file:///srv/pdm-pool. The .debs in
+    # dists/trixie/pdm/binary-amd64/ are symlinks into ../../../../proxmox/
+    # packages/, so the proxmox/ tree must be copied too for the symlinks to
+    # resolve.
+    mkdir -p /tmp/rootfs/srv/pdm-pool; \
+    cp -a /tmp/iso/dists /tmp/rootfs/srv/pdm-pool/dists; \
+    if [ -d /tmp/iso/proxmox ]; then \
+        cp -a /tmp/iso/proxmox /tmp/rootfs/srv/pdm-pool/proxmox; \
+    fi; \
+    # Free everything we no longer need from this stage.
+    rm -rf /tmp/iso /iso
+
+# ===========================================================================
+# Stage 2: pdm-base — a scratch image filled with the extracted Debian rootfs.
+# ===========================================================================
+FROM scratch AS pdm-base
+
+COPY --from=extractor /tmp/rootfs/ /
+
+# Fail fast if the rootfs copy did not yield a working Debian userspace.
+RUN ["/bin/sh", "-c", "echo OK && cat /etc/os-release"]
+
+# ===========================================================================
+# Stage 3: final image.
+# ===========================================================================
+FROM pdm-base
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    S6_OVERLAY_VERSION=3.2.0.2 \
+    S6_KEEP_ENV=1 \
+    S6_BEHAVIOUR_IF_STAGE2_FAILS=2 \
+    S6_VERBOSITY=1 \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+# ---------------------------------------------------------------------------
+# 1. Install policy-rc.d + systemctl shim BEFORE any apt installs that might
+#    trigger service starts via postinst (invoke-rc.d / systemctl).
+# ---------------------------------------------------------------------------
+COPY rootfs/usr/sbin/policy-rc.d        /usr/sbin/policy-rc.d
+COPY rootfs/usr/local/sbin/systemctl    /usr/local/sbin/systemctl
+RUN chmod +x /usr/sbin/policy-rc.d /usr/local/sbin/systemctl \
+ && ln -sf /usr/local/sbin/systemctl /usr/sbin/systemctl \
+ && ln -sf /usr/local/sbin/systemctl /usr/bin/systemctl
+
+# ---------------------------------------------------------------------------
+# 2. Neutralise bare-metal-installer placeholders baked into the squashfs:
+#    - /etc/machine-id must be empty so systemd-machine-id-setup regenerates
+#      a unique id per container instance.
+#    - /etc/hostname is removed so Docker can inject the container hostname.
+#    - root is currently passwordless from the installer image; lock it. The
+#      runtime entrypoint resets it from PDM_ROOT_PASSWORD.
+# ---------------------------------------------------------------------------
+# /etc/hostname can't be unlinked here — the classic Docker builder bind-mounts
+# it into RUN containers. Truncate instead. (Docker overrides /etc/hostname at
+# runtime with the actual container hostname regardless.)
+RUN : > /etc/machine-id \
+ && (: > /etc/hostname 2>/dev/null || true) \
+ && (usermod -p '*' root || true)
+
+# ---------------------------------------------------------------------------
+# 3. Add the ISO-shipped local pool as an apt source. We keep the upstream
+#    debian.sources file in place because pdm-base lacks ca-certificates and
+#    a few other stock Debian packages PDM transitively needs. The local pool
+#    is unsigned (no InRelease/Release.gpg), hence Trusted: yes. The on-disk
+#    component is named "pdm" (not "main" as the Release file claims).
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    install -d /etc/apt/sources.list.d; \
+    { \
+        echo 'Types: deb'; \
+        echo 'URIs: file:///srv/pdm-pool'; \
+        echo 'Suites: trixie'; \
+        echo 'Components: pdm'; \
+        echo 'Trusted: yes'; \
+    } > /etc/apt/sources.list.d/pdm-local.sources
+
+# ---------------------------------------------------------------------------
+# 4. Install Proxmox Datacenter Manager from the local (offline) pool.
+#    NOTE: do NOT install proxmox-datacenter-manager-meta — it depends on
+#    proxmox-default-kernel which is useless and huge inside a container.
+#    ca-certificates is needed for HTTPS to managed Proxmox VE/PBS nodes.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        proxmox-datacenter-manager \
+        proxmox-datacenter-manager-ui \
+        proxmox-datacenter-manager-client \
+        ca-certificates \
+        wget \
+        xz-utils \
+    ; \
+    # PDM's postinst drops a pdm-enterprise.sources file that requires a paid
+    # subscription. Remove it so future apt operations (and PDM's own daily
+    # update probe) don't 401.
+    rm -f /etc/apt/sources.list.d/pdm-enterprise.sources; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# 5. Strip installer-only packages and bloat (~180 MB savings). The squashfs
+#    rootfs ships ZFS, GRUB, initramfs tooling, etc. — none useful in a
+#    container. The `|| true` hedges against package list drift between ISOs.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    # udev is dead weight in containers (no host devices to manage); chrony was
+    # kept by mistake but the host kernel's clock is authoritative and PDM
+    # doesn't ship its own NTP service in our supervision tree.
+    apt-get -y purge --auto-remove \
+        grub-common grub-efi-amd64-bin grub-efi-amd64-unsigned grub-pc-bin \
+        efibootmgr initramfs-tools initramfs-tools-bin initramfs-tools-core \
+        dracut-install klibc-utils libklibc cpio busybox \
+        zfsutils-linux zfs-initramfs lvm2 dmeventd dmsetup \
+        btrfs-progs xfsprogs gdisk dosfstools \
+        bind9-dnsutils bind9-host pciutils usbutils \
+        udev chrony \
+        2>/dev/null || true; \
+    rm -rf /usr/share/locale/* /usr/share/man/* /usr/share/doc/* \
+           /usr/share/info/* /usr/share/grub /usr/lib/grub \
+           /var/lib/apt/lists/* /var/cache/apt/archives/*.deb \
+           /var/log/* /srv/pdm-pool /tmp/*; \
+    # The local pool is gone; nuke the apt source that referenced it so future
+    # apt-get update calls don't fail. Also drop debian.sources so PDM's
+    # "Updates" panel and apt-get update API endpoint don't hit deb.debian.org
+    # per click — the panel will show "no updates available" instead of 27
+    # unapplyable Debian package upgrades. Finally, remove orphaned cron
+    # snippets (no cron daemon installed).
+    rm -f /etc/apt/sources.list.d/pdm-local.sources \
+          /etc/apt/sources.list.d/debian.sources \
+          /etc/cron.d/e2scrub_all \
+          /etc/cron.daily/apt-compat \
+          /etc/cron.daily/dpkg; \
+    # Truncate the bare-metal-installer banner — cosmetic; never displayed in
+    # a container without a TTY but it's a clean detail.
+    : > /etc/issue || true
+
+# ---------------------------------------------------------------------------
+# 6. Install s6-overlay v3 (noarch + x86_64), checksum-verified.
+#    pdm-base already ships wget, xz-utils, and tar; only install them if a
+#    future ISO refresh drops one.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    missing=""; \
+    for cmd in wget xz tar sha256sum; do \
+        command -v "$cmd" >/dev/null 2>&1 || missing="$missing $cmd"; \
+    done; \
+    if [ -n "$missing" ]; then \
+        echo "Bootstrapping missing tools:$missing"; \
+        apt-get update; \
+        apt-get install -y --no-install-recommends wget xz-utils tar coreutils; \
+        rm -rf /var/lib/apt/lists/*; \
+    fi; \
+    cd /tmp; \
+    base="https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}"; \
+    WGET_OPTS="--tries=5 --waitretry=3 --retry-connrefused --timeout=30"; \
+    for pkg in "s6-overlay-noarch.tar.xz" \
+               "s6-overlay-x86_64.tar.xz"; do \
+        wget $WGET_OPTS "${base}/${pkg}"; \
+        wget $WGET_OPTS "${base}/${pkg}.sha256"; \
+        sha256sum -c "${pkg}.sha256"; \
+        tar -C / -Jxpf "${pkg}"; \
+        rm -f "${pkg}" "${pkg}.sha256"; \
+    done
+
+# ---------------------------------------------------------------------------
+# 7. Overlay the project rootfs (s6 services, cont-init scripts, shims).
+# ---------------------------------------------------------------------------
+COPY rootfs/ /
+
+# Re-assert exec bits in case COPY metadata was lost on the host filesystem.
+RUN chmod +x /usr/local/sbin/systemctl \
+             /usr/sbin/policy-rc.d \
+             /usr/local/bin/pdm-init.sh
+
+# ---------------------------------------------------------------------------
+# 8. Final cleanup.
+# ---------------------------------------------------------------------------
+RUN rm -rf /var/lib/apt/lists/* /tmp/* /var/cache/apt/archives/*.deb 2>/dev/null || true
+
+EXPOSE 8443
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD wget -q --no-check-certificate -O- https://127.0.0.1:8443/ >/dev/null 2>&1 || exit 1
+
+ENTRYPOINT ["/init"]
+
+# ---------------------------------------------------------------------------
+# 9. OCI / Proxmox metadata.
+# ---------------------------------------------------------------------------
+LABEL org.opencontainers.image.title="Proxmox Datacenter Manager" \
+      org.opencontainers.image.description="Proxmox Datacenter Manager 1.0 (ISO Refresh, 2025-12-10) repackaged from the official ISO into a container image" \
+      org.opencontainers.image.version="1.0-iso2" \
+      org.opencontainers.image.vendor="Proxmox (repackaged)" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.source="https://www.proxmox.com/en/downloads/proxmox-datacenter-manager" \
+      org.opencontainers.image.url="https://pdm.proxmox.com/" \
+      org.opencontainers.image.documentation="https://pdm.proxmox.com/docs/" \
+      com.proxmox.product="pdm" \
+      com.proxmox.iso.release="1.0" \
+      com.proxmox.iso.isorelease="2" \
+      com.proxmox.iso.kernel="6.17" \
+      com.proxmox.iso.debian="13.2-trixie"

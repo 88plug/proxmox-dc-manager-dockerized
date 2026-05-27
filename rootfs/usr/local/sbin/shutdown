@@ -1,0 +1,6 @@
+#!/bin/sh
+# Stub for PDM's "Shutdown" UI button (and any code path that exec's
+# `shutdown -h now`). See reboot stub for rationale.
+echo "[shutdown-stub] shutdown requested but suppressed: this PDM is a container." >&2
+echo "[shutdown-stub] Stop with 'docker compose down' from the host." >&2
+exit 0

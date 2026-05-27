@@ -1,0 +1,11 @@
+#!/bin/sh
+# systemctl shim for containerized environments without systemd.
+# Silences postinst hooks during apt and any runtime systemctl calls.
+echo "systemctl shim: $*" >&2
+action="${1:-}"
+case "$action" in
+    daemon-reload|daemon-reexec|enable|disable|start|stop|restart|reload|try-restart|reload-or-restart|mask|unmask|preset|status|show|list-units|list-unit-files) exit 0 ;;
+    is-enabled) exit 0 ;;
+    is-active|is-failed) exit 3 ;;
+    *) exit 0 ;;
+esac

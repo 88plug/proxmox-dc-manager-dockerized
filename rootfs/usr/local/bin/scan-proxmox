@@ -1,0 +1,371 @@
+#!/usr/bin/env python3
+# scan-proxmox: find Proxmox VE/PBS nodes on a network and emit (or register)
+# everything PDM needs to add them as remotes.
+#
+# Reads creds you provide, scans a CIDR, and for each hit:
+#   1. fetches the TLS cert + computes its SHA-256 fingerprint
+#   2. authenticates via /api2/json/access/ticket
+#   3. queries cluster/node context (cluster name, node list)
+#   4. mints a fresh API token via /api2/json/access/users/<userid>/token/<id>
+#   5. prints a row, or POSTs the remote into PDM if --register is given
+#
+# Stdlib only; designed to run from inside the proxmox-dc-manager image
+# (`make scan ...`) but works on any host with Python 3.9+.
+
+import argparse, concurrent.futures, hashlib, ipaddress, json, os, ssl, sys
+import urllib.parse, urllib.request, urllib.error
+from collections import defaultdict
+from dataclasses import dataclass, field, asdict
+from typing import Optional
+
+PRODUCT_BY_PORT = {8006: "pve", 8007: "pbs"}
+
+
+@dataclass
+class Hit:
+    ip: str
+    port: int
+    product: str             # "pve" | "pbs"
+    fingerprint: str         # sha256 colon-separated hex (PDM format)
+    release: str = ""
+    cluster: Optional[str] = None   # PVE cluster name; None = standalone
+    nodename: str = ""              # the node's own hostname
+    cluster_nodes: list = field(default_factory=list)  # peer IPs/hostnames
+    authid: str = ""                # token id we minted, e.g. root@pam!pdm-scanner
+    token: str = ""                 # token secret
+
+
+def err(*a):  print("scan-proxmox:", *a, file=sys.stderr)
+
+
+# --- TLS / fingerprint ------------------------------------------------------
+
+def cert_fingerprint(host: str, port: int, timeout: float) -> Optional[str]:
+    """SHA-256 fingerprint of the peer cert, formatted AA:BB:CC:..."""
+    ctx = ssl._create_unverified_context()
+    ctx.check_hostname = False
+    try:
+        import socket
+        with socket.create_connection((host, port), timeout=timeout) as s:
+            with ctx.wrap_socket(s, server_hostname=host) as ss:
+                der = ss.getpeercert(binary_form=True)
+        return ":".join(f"{b:02X}" for b in hashlib.sha256(der).digest())
+    except (OSError, ssl.SSLError):
+        return None
+
+
+# --- HTTPS API client (no requests/external deps) ---------------------------
+
+class ApiClient:
+    def __init__(self, host: str, port: int, timeout: float):
+        self.base = f"https://{host}:{port}/api2/json"
+        self.timeout = timeout
+        self.ctx = ssl._create_unverified_context()
+        self.ctx.check_hostname = False
+        self.cookie = None
+        self.csrf = None
+
+    def _req(self, method: str, path: str, *, data=None, auth=False):
+        url = self.base + path
+        body = None
+        headers = {}
+        if data is not None:
+            if isinstance(data, dict):
+                # x-www-form-urlencoded for /access/ticket; JSON for everything else
+                if path.endswith("/access/ticket"):
+                    body = urllib.parse.urlencode(data).encode()
+                    headers["Content-Type"] = "application/x-www-form-urlencoded"
+                else:
+                    body = json.dumps(data).encode()
+                    headers["Content-Type"] = "application/json"
+            else:
+                body = data.encode() if isinstance(data, str) else data
+        if auth:
+            if self.cookie:
+                headers["Cookie"] = self.cookie
+            if self.csrf and method != "GET":
+                headers["CSRFPreventionToken"] = self.csrf
+        req = urllib.request.Request(url, data=body, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout, context=self.ctx) as r:
+                return r.status, r.headers, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers, e.read()
+
+    def login(self, user: str, password: str):
+        st, hdrs, body = self._req("POST", "/access/ticket",
+                                   data={"username": user, "password": password})
+        if st != 200:
+            raise RuntimeError(f"login {st}: {body[:200]!r}")
+        d = json.loads(body)["data"]
+        # session cookie comes back as a Set-Cookie header
+        sc = hdrs.get("Set-Cookie") or ""
+        for piece in sc.split(","):
+            piece = piece.strip()
+            if "AuthCookie=" in piece:
+                self.cookie = piece.split(";", 1)[0]
+                break
+        # PVE/PBS use legacy `PVEAuthCookie=ticket-string` — we may also need
+        # to assemble the cookie ourselves if the server sent only the ticket.
+        if not self.cookie and "ticket" in d:
+            cookie_name = {"pve": "PVEAuthCookie", "pbs": "PBSAuthCookie"}.get(
+                self._product_hint, "AuthCookie")
+            self.cookie = f"{cookie_name}={d['ticket']}"
+        self.csrf = d.get("CSRFPreventionToken", "")
+        return d
+
+    def get(self, path):  return self._req("GET", path, auth=True)
+    def post(self, path, data):  return self._req("POST", path, data=data, auth=True)
+    def delete(self, path):  return self._req("DELETE", path, auth=True)
+
+    _product_hint = ""  # set externally to disambiguate cookie name
+
+
+# --- core: probe + harvest --------------------------------------------------
+
+def probe_one(ip: str, port: int, user: str, password: str,
+              token_name: str, timeout: float, force_token: bool) -> Optional[Hit]:
+    fp = cert_fingerprint(ip, port, timeout)
+    if not fp:
+        return None
+    product = PRODUCT_BY_PORT[port]
+    h = Hit(ip=ip, port=port, product=product, fingerprint=fp)
+    api = ApiClient(ip, port, timeout)
+    api._product_hint = product
+
+    # /version is unauthenticated on PVE/PBS
+    st, _, body = api._req("GET", "/version")
+    if st != 200:
+        err(f"{ip}:{port} /version returned {st}; not a Proxmox endpoint, skipping")
+        return None
+    try:
+        ver = json.loads(body).get("data", {})
+        h.release = ver.get("release") or ver.get("version") or ""
+    except (ValueError, AttributeError):
+        return None
+
+    try:
+        api.login(user, password)
+    except Exception as e:
+        err(f"{ip}:{port} login failed: {e}")
+        return h  # still return what we have so the table shows the host
+    h.nodename = ip  # fallback
+
+    if product == "pve":
+        st, _, body = api.get("/cluster/status")
+        if st == 200:
+            for node in json.loads(body).get("data", []):
+                if node.get("type") == "cluster":
+                    h.cluster = node.get("name")
+                elif node.get("type") == "node":
+                    name = node.get("name", "")
+                    if node.get("local"):
+                        h.nodename = name or h.nodename
+                    if name:
+                        h.cluster_nodes.append({
+                            "name": name,
+                            "ip": node.get("ip") or name,
+                        })
+    else:  # pbs
+        st, _, body = api.get("/nodes")
+        if st == 200:
+            for node in json.loads(body).get("data", []):
+                name = node.get("node", "")
+                if name:
+                    h.nodename = name
+                    h.cluster_nodes = [{"name": name, "ip": ip}]
+
+    # Mint a token. authid format = "<user>!<tokenid>"
+    userid_only = user
+    tokenid = token_name
+    st, _, body = api.post(f"/access/users/{urllib.parse.quote(userid_only)}/token/{urllib.parse.quote(tokenid)}",
+                           data={"privsep": 0})
+    if st == 400 and force_token:
+        api.delete(f"/access/users/{urllib.parse.quote(userid_only)}/token/{urllib.parse.quote(tokenid)}")
+        st, _, body = api.post(f"/access/users/{urllib.parse.quote(userid_only)}/token/{urllib.parse.quote(tokenid)}",
+                               data={"privsep": 0})
+    if st in (200, 201):
+        d = json.loads(body).get("data", {})
+        h.token = d.get("value", "")
+        h.authid = f"{userid_only}!{tokenid}"
+    else:
+        err(f"{ip}:{port} token mint failed ({st}): {body[:200]!r}. "
+            f"Pass --force-token to recreate, or pick a fresh --token-name.")
+    return h
+
+
+def scan(cidr: str, ports: list, user: str, password: str,
+         token_name: str, workers: int, timeout: float,
+         force_token: bool):
+    net = ipaddress.ip_network(cidr, strict=False)
+    targets = [(str(ip), p) for ip in net.hosts() for p in ports]
+    err(f"scanning {len(targets)} (ip,port) pairs with {workers} workers")
+    hits: list = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = {pool.submit(probe_one, ip, p, user, password, token_name,
+                            timeout, force_token): (ip, p)
+                for (ip, p) in targets}
+        for fut in concurrent.futures.as_completed(futs):
+            h = fut.result()
+            if h:
+                ip, p = futs[fut]
+                err(f"hit {ip}:{p} ({h.product}{' '+h.release if h.release else ''}"
+                    f"{' cluster='+h.cluster if h.cluster else ''})")
+                hits.append(h)
+    return hits
+
+
+# --- output: group into PDM remotes -----------------------------------------
+
+def to_pdm_remotes(hits: list) -> list:
+    """Group hits into PDM remote definitions. PVE cluster members → one
+    remote with all peer IPs; standalone PVE/PBS nodes → one remote each."""
+    remotes = []
+    by_cluster: dict = defaultdict(list)
+    for h in hits:
+        if h.product == "pve" and h.cluster:
+            by_cluster[h.cluster].append(h)
+        else:
+            remotes.append(_one_remote(h))
+    for cname, members in by_cluster.items():
+        # Build IP → fingerprint map across ALL probed members so each peer
+        # carries its own fingerprint when we emit the node strings. (Earlier
+        # passes that "saw" an IP without a fingerprint won't shadow a later
+        # member that did probe that IP directly.)
+        fp_by_ip = {h.ip: h.fingerprint for h in members}
+        addr_order: list = []
+        seen = set()
+        for h in members:
+            for peer in (h.cluster_nodes or [{"name": h.nodename, "ip": h.ip}]):
+                addr = peer.get("ip") or peer.get("name")
+                if not addr or addr in seen: continue
+                seen.add(addr)
+                addr_order.append(addr)
+        nodes_strs = []
+        for addr in addr_order:
+            fp = fp_by_ip.get(addr, "")
+            nodes_strs.append(f"{addr},fingerprint={fp}" if fp else addr)
+        m0 = members[0]
+        remotes.append({
+            "id": cname,
+            "type": "pve",
+            "authid": m0.authid,
+            "token": m0.token,
+            "nodes": nodes_strs or [m0.ip],
+        })
+    return remotes
+
+
+def _one_remote(h: Hit) -> dict:
+    addr = h.nodename or h.ip
+    node_str = f"{h.ip},fingerprint={h.fingerprint}"
+    return {
+        "id": (h.nodename or h.ip).replace(".", "-"),
+        "type": h.product,
+        "authid": h.authid,
+        "token": h.token,
+        "nodes": [node_str],
+    }
+
+
+# --- output: human + json + register ----------------------------------------
+
+def print_table(remotes: list):
+    if not remotes:
+        print("(no Proxmox endpoints found)")
+        return
+    print(f"{'TYPE':4} {'ID':24} {'AUTHID':30} TOKEN…    NODES")
+    print("-" * 100)
+    for r in remotes:
+        token_short = (r["token"][:8] + "…") if r["token"] else "-"
+        nodes = "; ".join(r["nodes"])
+        print(f"{r['type']:4} {r['id'][:24]:24} {r['authid'][:30]:30} {token_short:9} {nodes}")
+    print()
+    print("To register manually, in the PDM UI: Remotes → Add → "
+          "paste each row's authid, token, and node string.")
+
+
+def register(remotes: list, pdm_url: str, pdm_user: str, pdm_pass: str,
+             timeout: float, force: bool):
+    parts = urllib.parse.urlparse(pdm_url)
+    host, port = parts.hostname, parts.port or 8443
+    api = ApiClient(host, port, timeout)
+    api._product_hint = "pdm"
+    api.login(pdm_user, pdm_pass)
+    # PDM cookie name is __Host-PDMAuthCookie; the login() helper extracts it
+    # from Set-Cookie correctly.
+    for r in remotes:
+        if not r["authid"] or not r["token"]:
+            err(f"skip {r['id']} — no token (auth/mint failed)"); continue
+        st, _, body = api.post("/remotes/remote", data=r)
+        if st in (200, 201):
+            print(f"  ✓ registered {r['type']:3} {r['id']}")
+        elif st == 400 and force and b"already exists" in body:
+            api.delete(f"/remotes/remote/{urllib.parse.quote(r['id'])}")
+            st, _, body = api.post("/remotes/remote", data=r)
+            print(f"  ✓ replaced  {r['type']:3} {r['id']}")
+        else:
+            err(f"  ✗ {r['type']} {r['id']}: {st} {body[:200]!r}")
+
+
+# --- main -------------------------------------------------------------------
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Scan a CIDR for Proxmox VE/PBS nodes and emit PDM "
+                    "remote definitions; optionally register into a PDM.")
+    ap.add_argument("--cidr", default="192.168.1.0/24")
+    ap.add_argument("--ports", default="8006,8007",
+                    help="comma list, default 8006 (PVE) and 8007 (PBS)")
+    ap.add_argument("--user", default="root@pam",
+                    help="default credential user, format user@realm")
+    ap.add_argument("--password", default=os.environ.get("SCAN_PASSWORD", ""),
+                    help="default credential password (or env SCAN_PASSWORD)")
+    ap.add_argument("--token-name", default="pdm-scanner",
+                    help="token id to mint on each remote (default pdm-scanner)")
+    ap.add_argument("--force-token", action="store_true",
+                    help="if a token with --token-name already exists, delete and recreate")
+    ap.add_argument("--workers", type=int, default=64)
+    ap.add_argument("--timeout", type=float, default=1.5,
+                    help="per-connection timeout in seconds")
+    ap.add_argument("--json", action="store_true", help="emit JSON instead of a table")
+    ap.add_argument("--register", default="",
+                    help="PDM URL (e.g. https://127.0.0.1:8443) to auto-register found remotes")
+    ap.add_argument("--register-user", default="root@pam")
+    ap.add_argument("--register-pass",
+                    default=os.environ.get("PDM_ROOT_PASSWORD", ""),
+                    help="defaults to env PDM_ROOT_PASSWORD")
+    ap.add_argument("--force-replace", action="store_true",
+                    help="replace existing PDM remotes that conflict by id")
+    args = ap.parse_args()
+
+    if not args.password:
+        err("--password (or env SCAN_PASSWORD) is required"); return 2
+
+    ports = [int(p) for p in args.ports.split(",") if p.strip()]
+    bad = [p for p in ports if p not in PRODUCT_BY_PORT]
+    if bad:
+        err(f"unsupported ports {bad}; only {sorted(PRODUCT_BY_PORT)} are recognized"); return 2
+
+    hits = scan(args.cidr, ports, args.user, args.password,
+                args.token_name, args.workers, args.timeout, args.force_token)
+    remotes = to_pdm_remotes(hits)
+
+    if args.json:
+        print(json.dumps({"hits": [asdict(h) for h in hits], "remotes": remotes}, indent=2))
+    else:
+        print_table(remotes)
+
+    if args.register:
+        if not args.register_pass:
+            err("--register requires --register-pass or env PDM_ROOT_PASSWORD"); return 2
+        if not remotes:
+            return 0
+        err(f"registering {len(remotes)} remote(s) into {args.register}")
+        register(remotes, args.register, args.register_user, args.register_pass,
+                 args.timeout, args.force_replace)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

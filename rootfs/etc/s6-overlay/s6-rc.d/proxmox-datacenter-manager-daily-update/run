@@ -1,0 +1,23 @@
+#!/command/with-contenv sh
+# Replicates proxmox-datacenter-manager-daily-update.timer (OnCalendar
+# 01:00 + RandomizedDelaySec 5h on bare metal). Wait for the priv socket
+# so ACME/cert work the binary does won't fail, then run an initial
+# pre-trigger so the UI's Updates panel isn't blank for the first day,
+# then loop with 24h base + 0-5h jitter.
+set -e
+exec 2>&1
+i=0
+while [ ! -S /run/proxmox-datacenter-manager/priv.sock ]; do
+  i=$((i+1))
+  [ $i -gt 120 ] && { echo "[daily-update] timeout waiting for priv.sock" >&2; exit 1; }
+  sleep 0.5
+done
+sleep 30
+echo "[daily-update] initial run on container start"
+/usr/libexec/proxmox/proxmox-datacenter-manager-daily-update || true
+while :; do
+  jitter=$(( $(od -An -N2 -tu2 < /dev/urandom) % 18000 ))
+  sleep $(( 86400 + jitter ))
+  echo "[daily-update] scheduled run"
+  /usr/libexec/proxmox/proxmox-datacenter-manager-daily-update || true
+done

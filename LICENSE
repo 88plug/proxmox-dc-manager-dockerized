@@ -1,0 +1,44 @@
+MIT License
+
+Copyright (c) 2026 the proxmox-dc-manager-dockerized contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+----------------------------------------------------------------------------
+
+This MIT license applies to the Dockerfile, compose.yaml, Makefile, the
+scripts under rootfs/, README.md, and supporting build glue in this
+repository.
+
+The container IMAGE produced by `docker build` against this repository
+contains, in addition to the above, software with its own licenses:
+
+  - Proxmox Datacenter Manager (proxmox-datacenter-manager and all
+    proxmox-* packages from the official ISO):  AGPL-3.0-or-later
+    https://www.proxmox.com/en/about/legal-information
+
+  - Debian base userland from debian:trixie-slim and the Proxmox ISO:
+    a mix of GPL-2.0+, GPL-3.0+, BSD, MIT, and other open-source licenses
+    (see /usr/share/doc/<package>/copyright inside the image).
+
+  - s6-overlay (just-containers/s6-overlay): ISC
+    https://github.com/just-containers/s6-overlay/blob/master/COPYING
+
+This repository is not affiliated with or endorsed by Proxmox Server
+Solutions GmbH. "Proxmox" is a trademark of Proxmox Server Solutions GmbH.

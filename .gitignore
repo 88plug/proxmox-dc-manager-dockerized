@@ -1,0 +1,16 @@
+.env
+compose.override.yaml
+*.local
+volumes/
+__pycache__/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Build artifacts (the Dockerfile fetches the ISO itself)
+.iso-work/
+
+# Claude Code session state
+.claude/
+/tmp/pdm-build.log

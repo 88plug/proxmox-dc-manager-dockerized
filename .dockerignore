@@ -1,0 +1,17 @@
+.git
+.env
+.env.local
+*.local
+*.swp
+.idea
+.vscode
+.DS_Store
+__pycache__
+volumes/
+# The Dockerfile fetches the ISO itself in the extractor stage; no part of
+# .iso-work/ needs to be in the build context. Excluding the whole tree
+# avoids streaming 5+ GB to the daemon on every build.
+.iso-work/
+*.md
+!README.md
+compose.yaml.bak

@@ -1,0 +1,6 @@
+#!/bin/sh
+# Stub for PDM's "Halt" UI button (and any code path that exec's `halt`).
+# See reboot stub for rationale.
+echo "[halt-stub] halt requested but suppressed: this PDM is a container." >&2
+echo "[halt-stub] Stop with 'docker compose down' from the host." >&2
+exit 0

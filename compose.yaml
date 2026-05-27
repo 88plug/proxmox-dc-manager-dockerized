@@ -1,0 +1,78 @@
+# Proxmox Datacenter Manager (PDM) - Docker Compose stack
+#
+# Quickstart:
+#   docker compose up -d --build
+# Then browse https://localhost:8443/  (login: root  /  realm: Linux PAM
+# / password: changeme — change it from the UI immediately).
+#
+# Architecture: x86_64 only. PDM upstream packages are not published for arm64.
+#
+# Build:
+#   The extractor stage downloads and sha256-verifies the official Proxmox PDM
+#   ISO (~1.4 GB) automatically and caches it as a Docker layer. To pin a
+#   different release, override the build args in the `build.args` block below.
+#   BuildKit is required (default in modern Docker).
+#
+# Customization:
+#   Edit the values in the `environment:` block below. Most users only need to
+#   change PDM_ROOT_PASSWORD. The password is seeded into the container's Linux
+#   `root` account on first boot and persisted in the pdm-config volume — set
+#   PDM_ROOT_PASSWORD_FORCE=1 to re-apply it on every start. Two additional
+#   knobs are available: PDM_FORCE_REGEN_CERT (auto-rotate the self-signed TLS
+#   cert when PDM_FQDN changes) and PDM_ALLOW_NO_PASSWORD (strict-no-password
+#   guard at startup).
+
+services:
+  pdm:
+    build:
+      context: .
+      args:
+        # Override these to pin a different ISO release.
+        PDM_ISO_URL: http://download.proxmox.com/iso/proxmox-datacenter-manager_1.0-2.iso
+        PDM_ISO_SHA256: b4b98ed3e8f4dabb1151ebb713d6e7109aeba00d95b88bf65f954dd9ef1e89e1
+    image: proxmox-dc-manager:local
+    container_name: proxmox-dc-manager
+    hostname: pdm
+    restart: unless-stopped
+    environment:
+      # ----- Required on first run -----
+      PDM_ROOT_PASSWORD: changeme
+      # Pre-hashed root password (overrides PDM_ROOT_PASSWORD if set).
+      # Generate with: openssl passwd -6 'mypassword'
+      PDM_ROOT_PASSWORD_HASHED: ""
+      # Re-apply password on every container start (1 = yes).
+      PDM_ROOT_PASSWORD_FORCE: "0"
+      # Refuse to start if no root password is set (default). Set to 1 only for
+      # debugging / pre-seeded shadow scenarios.
+      PDM_ALLOW_NO_PASSWORD: "0"
+
+      # ----- Optional -----
+      # Fully qualified hostname; embedded in /etc/hosts and the TLS cert CN.
+      PDM_FQDN: pdm.local
+      # Auto-regenerate the self-signed TLS cert when PDM_FQDN changes (1 = yes).
+      # Operator-supplied CA-signed certs (subject != issuer) are NEVER touched.
+      PDM_FORCE_REGEN_CERT: "0"
+      # Mailto address written into access/user.cfg on first run.
+      # Defaults to root@${PDM_FQDN} if empty.
+      PDM_MAILTO: ""
+      # Multi-line authorized_keys for root over SSH. Wrap in quotes for newlines:
+      #   PDM_ROOT_SSH_KEYS: |
+      #     ssh-ed25519 AAAA... user@host
+      #     ssh-rsa AAAA... another@host
+      PDM_ROOT_SSH_KEYS: ""
+      # Container timezone.
+      TZ: Etc/UTC
+      PDM_TZ: Etc/UTC
+    ports:
+      - "8443:8443/tcp"
+    volumes:
+      - pdm-config:/etc/proxmox-datacenter-manager
+      - pdm-data:/var/lib/proxmox-datacenter-manager
+    tmpfs:
+      - /run/proxmox-datacenter-manager:rw,size=64m
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  pdm-config:
+  pdm-data:
