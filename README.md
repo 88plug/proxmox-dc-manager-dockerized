@@ -147,6 +147,7 @@ The included `Makefile` wraps the most common workflows. Run `make help` for the
 
 ```sh
 make build         # build the image (extractor stage downloads the ISO automatically)
+make refresh       # cache-busted rebuild: re-pulls Debian Trixie security updates
 make up            # start container in background
 make down          # stop & remove container (volumes kept)
 make restart       # restart the pdm service
@@ -168,6 +169,15 @@ When Proxmox publishes a new ISO:
 2. `make build && docker compose up -d`
 
 Named volumes are preserved across rebuilds, so configuration and remotes carry over. The PDM postinst handles intra-version migrations automatically (e.g. the 1.0.0 -> 1.0.1 `ldap_passwords.json` rewrite). Review the upstream changelog (<https://pdm.proxmox.com/docs/>) before upgrading.
+
+### Debian base updates between ISO releases
+
+The Dockerfile runs `apt-get dist-upgrade` against `deb.debian.org` once during the build (after PDM is installed from the local ISO pool, before the apt sources are wiped). That lifts glibc, openssl, ca-certificates, and the rest of the Debian Trixie base to current security/point-release state without waiting for Proxmox to publish a new ISO.
+
+- `make build` — incremental; Docker caches the dist-upgrade layer, so a second build the next day reuses yesterday's snapshot.
+- `make refresh` — `--pull --no-cache`; forces a fresh pull of `debian:trixie-slim` in the extractor and a fresh `apt-get update && dist-upgrade` in the final image. Use this when you want current Debian patches without bumping the ISO pin.
+
+Tradeoff: hermeticity loosens. Two builds on different days with the same pinned ISO can diverge by however much Debian has shipped between them. The PDM packages themselves remain pinned to the ISO's local apt pool.
 
 ## Troubleshooting
 

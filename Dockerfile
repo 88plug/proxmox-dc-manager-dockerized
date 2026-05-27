@@ -152,6 +152,24 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
+# 4b. Roll the squashfs-frozen Debian base forward to current Trixie security
+#    + point updates. Without this, glibc/openssl/etc. stay pinned to whatever
+#    state the ISO snapshot froze them at on its build date, and the CVE
+#    window grows linearly until Proxmox publishes a new ISO. Running this
+#    while debian.sources is still present (the section below removes it)
+#    lets apt fetch from deb.debian.org one time per build. Tradeoff: strict
+#    reproducibility loosens — two builds on different days with the same
+#    pinned ISO can diverge by however much Debian has shipped between them.
+#    --no-install-recommends prevents new recommends from being pulled in if
+#    a package's dep graph changes across the upgrade.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    apt-get update; \
+    apt-get -y --no-install-recommends dist-upgrade; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
 # 5. Strip installer-only packages and bloat (~180 MB savings). The squashfs
 #    rootfs ships ZFS, GRUB, initramfs tooling, etc. — none useful in a
 #    container. The `|| true` hedges against package list drift between ISOs.

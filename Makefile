@@ -3,7 +3,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build up down restart logs shell init-shell \
+.PHONY: help build refresh up down restart logs shell init-shell \
         pdm-version set-password scan scan-register \
         lint clean reset
 
@@ -13,6 +13,9 @@ help: ## Show this help.
 
 build: ## Build the Docker image (extractor stage downloads the ISO automatically).
 	DOCKER_BUILDKIT=1 docker compose build
+
+refresh: ## Cache-busted rebuild: re-pulls Debian Trixie security updates and re-runs dist-upgrade.
+	DOCKER_BUILDKIT=1 docker compose build --pull --no-cache
 
 up: ## Start container in background.
 	docker compose up -d
