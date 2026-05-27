@@ -128,6 +128,13 @@ FROM pdm-base
 # OCI clients show "unknown" rather than failing.
 ARG GIT_REVISION=""
 ARG BUILD_DATE=""
+# URL to the *packaging* source (this repo). The OCI spec defines
+# `image.source` as the URL to find the build instructions, NOT the upstream
+# product page. Defaults to GitHub's homepage when no explicit override is
+# supplied at build time; CI fills it in via `${{ github.server_url }}/${{
+# github.repository }}`. Distinct from `com.proxmox.upstream.source` below,
+# which points to the AGPL-required upstream PDM source.
+ARG IMAGE_SOURCE_URL="https://github.com"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     S6_OVERLAY_VERSION=3.2.0.2 \
@@ -263,10 +270,22 @@ RUN set -eux; \
         bind9-dnsutils bind9-host pciutils usbutils \
         udev chrony \
         2>/dev/null || true; \
-    rm -rf /usr/share/locale/* /usr/share/man/* /usr/share/doc/* \
+    rm -rf /usr/share/locale/* /usr/share/man/* \
            /usr/share/info/* /usr/share/grub /usr/lib/grub \
            /var/lib/apt/lists/* /var/cache/apt/archives/*.deb \
            /var/log/* /srv/pdm-pool /tmp/*; \
+    # /usr/share/doc/*: keep each package's copyright, SOURCE pointer, and
+    # changelog. These are the Debian DEP-5 license artifacts that satisfy
+    # AGPL §6 (license-and-source-availability) for the AGPL'd Proxmox bits
+    # we redistribute, plus the equivalent disclosures for every other
+    # bundled package. Deleting them was the only license-compliance gap in
+    # the image; keeping ~500 KB of copyright files closes it.
+    find /usr/share/doc -mindepth 2 -type f \
+        ! -name copyright \
+        ! -name SOURCE \
+        ! -name 'changelog*' \
+        -delete; \
+    find /usr/share/doc -mindepth 1 -type d -empty -delete; \
     # The local pool is gone; nuke the apt source that referenced it so future
     # apt-get update calls don't fail. Also drop debian.sources so PDM's
     # "Updates" panel and apt-get update API endpoint don't hit deb.debian.org
@@ -357,18 +376,23 @@ ENTRYPOINT ["/init"]
 # ---------------------------------------------------------------------------
 # 9. OCI / Proxmox metadata.
 # ---------------------------------------------------------------------------
-LABEL org.opencontainers.image.title="Proxmox Datacenter Manager" \
-      org.opencontainers.image.description="Proxmox Datacenter Manager 1.0 (ISO Refresh, 2025-12-10) repackaged from the official ISO into a container image" \
+LABEL org.opencontainers.image.title="Proxmox Datacenter Manager (community Docker repackaging)" \
+      org.opencontainers.image.description="Unofficial Docker repackaging of the official Proxmox Datacenter Manager 1.0 ISO. Not affiliated with Proxmox Server Solutions GmbH. 'Proxmox' is a trademark of Proxmox Server Solutions GmbH." \
       org.opencontainers.image.version="1.0-iso2" \
       org.opencontainers.image.revision="${GIT_REVISION}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
-      org.opencontainers.image.vendor="Proxmox (repackaged)" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
-      org.opencontainers.image.source="https://www.proxmox.com/en/downloads/proxmox-datacenter-manager" \
-      org.opencontainers.image.url="https://pdm.proxmox.com/" \
-      org.opencontainers.image.documentation="https://pdm.proxmox.com/docs/" \
+      org.opencontainers.image.vendor="Community-maintained (unofficial)" \
+      org.opencontainers.image.authors="proxmox-dc-manager-dockerized contributors" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later AND MIT AND ISC" \
+      org.opencontainers.image.source="${IMAGE_SOURCE_URL}" \
+      org.opencontainers.image.url="${IMAGE_SOURCE_URL}" \
+      org.opencontainers.image.documentation="${IMAGE_SOURCE_URL}#readme" \
       com.proxmox.product="pdm" \
       com.proxmox.iso.release="1.0" \
       com.proxmox.iso.isorelease="2" \
       com.proxmox.iso.kernel="6.17" \
-      com.proxmox.iso.debian="13.2-trixie"
+      com.proxmox.iso.debian="13.2-trixie" \
+      com.proxmox.upstream.source="https://git.proxmox.com/?p=proxmox-datacenter-manager.git;a=summary" \
+      com.proxmox.upstream.url="https://pdm.proxmox.com/" \
+      com.proxmox.upstream.documentation="https://pdm.proxmox.com/docs/" \
+      com.proxmox.upstream.trademark="Proxmox is a trademark of Proxmox Server Solutions GmbH"

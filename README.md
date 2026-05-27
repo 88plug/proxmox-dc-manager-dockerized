@@ -290,8 +290,11 @@ Tradeoff: hermeticity loosens. Two builds on different days with the same pinned
 
 ## License & Credits
 
-- Bundled software: **Proxmox Datacenter Manager** is distributed under AGPL-3.0; **s6-overlay** is ISC-licensed. Both retain their upstream licenses.
-- Dockerfile, scripts, and packaging in this repository are released under the **MIT License**.
+- **Packaging code in this repository** (Dockerfile, `rootfs/`, scripts, Makefile, compose.yaml): MIT License — see [`LICENSE`](LICENSE).
+- **The container image** produced by `docker build` bundles software with its own licenses — **Proxmox Datacenter Manager** is AGPL-3.0-or-later, **s6-overlay** is ISC, and the Debian Trixie base spans GPL/LGPL/BSD/MIT/Apache. See [`NOTICES.md`](NOTICES.md) for the full inventory with upstream source URLs.
+- Every package's `/usr/share/doc/<pkg>/copyright` file is preserved verbatim in the image so the DEP-5 license disclosure travels with the artifact.
+- **AGPL §13 (network use)**: if you serve PDM over a network from this image, users have a right to receive the Corresponding Source. Proxmox publishes it at <https://git.proxmox.com/?p=proxmox-datacenter-manager.git;a=summary> — that's the source pointer to share downstream.
+- **Trademark**: "Proxmox" is a trademark of Proxmox Server Solutions GmbH. Used here only to identify the software being packaged (nominative use); no endorsement is asserted or implied.
 - Credits / prior art:
   - <https://github.com/pbs-plus/proxmox-backup-docker> (s6-overlay supervision pattern)
   - <https://github.com/willmortimer/proxmox-datacenter-manager-docker> (apt-based prior art)

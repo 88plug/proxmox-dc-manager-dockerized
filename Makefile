@@ -12,15 +12,24 @@ help: ## Show this help.
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
+# IMAGE_SOURCE_URL is the OCI image.source label — should point at this repo.
+# Override on the command line if your local clone isn't a GitHub remote.
+IMAGE_SOURCE_URL ?= $(shell git config --get remote.origin.url 2>/dev/null \
+	| sed -E 's|^git@github\.com:|https://github.com/|; s|\.git$$||' \
+	| grep -E '^https?://' \
+	|| echo "https://github.com")
+
 build: ## Build the Docker image (extractor stage downloads the ISO automatically).
 	DOCKER_BUILDKIT=1 docker compose build \
 		--build-arg GIT_REVISION="$$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)" \
-		--build-arg BUILD_DATE="$$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+		--build-arg BUILD_DATE="$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+		--build-arg IMAGE_SOURCE_URL="$(IMAGE_SOURCE_URL)"
 
 refresh: ## Cache-busted rebuild: re-pulls Debian Trixie security updates and re-runs dist-upgrade.
 	DOCKER_BUILDKIT=1 docker compose build --pull --no-cache \
 		--build-arg GIT_REVISION="$$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)" \
-		--build-arg BUILD_DATE="$$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+		--build-arg BUILD_DATE="$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+		--build-arg IMAGE_SOURCE_URL="$(IMAGE_SOURCE_URL)"
 
 up: ## Start container in background.
 	docker compose up -d

@@ -102,6 +102,7 @@ jobs:
           build-args: |
             GIT_REVISION=${{ steps.args.outputs.git_revision }}
             BUILD_DATE=${{ steps.args.outputs.build_date }}
+            IMAGE_SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
           provenance: mode=max
           sbom: true
           # Scheduled runs bust the cache so Debian dist-upgrade actually
