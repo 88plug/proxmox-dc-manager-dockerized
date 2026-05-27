@@ -88,8 +88,12 @@ RUN set -eux; \
     bsdtar -xf /iso/pdm.iso -C /tmp/iso; \
     test -f /tmp/iso/pdm-base.squashfs; \
     unsquashfs -f -d /tmp/rootfs -no-progress -no-xattrs \
-        /tmp/iso/pdm-base.squashfs || true; \
+        /tmp/iso/pdm-base.squashfs; \
     # Sanity: the squashfs unpack must produce a valid Debian rootfs.
+    # The two test -f / test -d below catch a wholly empty extraction, but
+    # would pass on a partially-extracted tree (libs missing, binaries
+    # present, etc.). Dropping the `|| true` above means partial extracts
+    # surface as a build failure instead of an unsteady runtime.
     test -f /tmp/rootfs/etc/os-release; \
     test -d /tmp/rootfs/usr/bin; \
     # Copy the on-ISO apt pool into the rootfs so the next stage can install
@@ -345,7 +349,8 @@ RUN rm -rf /var/lib/apt/lists/* /tmp/* /var/cache/apt/archives/*.deb 2>/dev/null
 EXPOSE 8443
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD wget -q --no-check-certificate -O- https://127.0.0.1:8443/api2/json/ping >/dev/null 2>&1 || exit 1
+    CMD wget -qO- --no-check-certificate https://127.0.0.1:8443/api2/json/ping 2>/dev/null \
+        | grep -q '"data"[[:space:]]*:[[:space:]]*"pong"' || exit 1
 
 ENTRYPOINT ["/init"]
 

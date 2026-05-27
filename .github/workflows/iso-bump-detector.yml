@@ -54,8 +54,21 @@ jobs:
             | sort -uV | tail -n1 || true)
 
           if [ -z "$latest_iso" ]; then
-            echo "could not parse PDM ISO from listing — format may have changed" >&2
-            exit 0
+            # Listing came back, but the strict regex matched nothing. This is
+            # the durability hazard the agents flagged: a future Proxmox
+            # filename rename (e.g. `pdm_1.1-0.iso`) would silently make this
+            # workflow exit 0 forever, and the ISO pin would rot indefinitely
+            # with no failure signal in the Actions tab. Fail loudly instead.
+            # The maintainer's only "you need to look at this" surface is a
+            # red X on the iso-bump-detector run — make sure it shows up.
+            looser=$(printf '%s\n' "$listing" \
+              | grep -oE 'proxmox-datacenter-manager[^"<>]*\.iso' \
+              | sort -u | head -5 || true)
+            echo "FATAL: strict ISO regex matched zero filenames in a non-empty listing." >&2
+            echo "Proxmox may have renamed the ISO. Loose matches found (if any):" >&2
+            printf '  %s\n' "${looser:-<none>}" >&2
+            echo "Update the regex in this workflow and the iso-bump-detector will resume." >&2
+            exit 1
           fi
 
           latest_ver=$(echo "$latest_iso" | sed -E 's/^proxmox-datacenter-manager_(.*)\.iso$/\1/')
@@ -127,13 +140,17 @@ jobs:
           trap 'docker logs pdm-verify >&2 || true; docker rm -f pdm-verify >/dev/null 2>&1 || true' EXIT
           ok=0
           for i in $(seq 1 90); do
-            if curl -fsSk https://127.0.0.1:18443/api2/json/ping >/dev/null 2>&1; then
-              echo "ping ok after ${i}s"; ok=1; break
+            body=$(curl -fsSk https://127.0.0.1:18443/api2/json/ping 2>/dev/null || true)
+            # Same shape assertion as the runtime healthcheck. Critical here
+            # because this is the only gate before the bot pushes to main.
+            if printf '%s' "$body" | grep -q '"data"[[:space:]]*:[[:space:]]*"pong"'; then
+              echo "ping ok after ${i}s (payload verified)"; ok=1; break
             fi
             sleep 1
           done
           if [ "$ok" != "1" ]; then
-            echo "verification: API never came up — refusing to push bump" >&2
+            echo "verification: /api2/json/ping never returned expected payload" >&2
+            echo "verification: refusing to push bump — PDM API contract may have changed" >&2
             exit 1
           fi
 

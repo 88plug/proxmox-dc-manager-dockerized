@@ -140,11 +140,28 @@ fi
 CERT=/etc/proxmox-datacenter-manager/auth/api.pem
 KEY=/etc/proxmox-datacenter-manager/auth/api.key
 if [ -f "${CERT}" ] && [ -f "${KEY}" ]; then
-  cert_subj="$(openssl x509 -in "${CERT}" -noout -subject -nameopt RFC2253 2>/dev/null || true)"
-  cert_iss="$(openssl x509 -in "${CERT}" -noout -issuer  -nameopt RFC2253 2>/dev/null || true)"
-  cert_cn="$(printf '%s' "${cert_subj#subject=}" | grep -oE 'CN=[^,]+' | head -n1 | cut -d= -f2- || true)"
+  # Drop `|| true` from the openssl reads — a parse failure here used to
+  # silently leave cert_{subj,iss,cn} empty, which made the FQDN-match
+  # check below treat *any* cert as "doesn't match" and the issuer/subject
+  # comparison treat *any* cert as CA-signed (so we'd skip auto-rotation
+  # and the user would never see a warning). If openssl can't read the
+  # cert, the cert volume is corrupt — fail loudly.
+  if ! cert_subj="$(openssl x509 -in "${CERT}" -noout -subject -nameopt RFC2253 2>&1)"; then
+    warn "openssl could not read ${CERT}: ${cert_subj}"
+    warn "The cert volume appears corrupt. Remove auth/api.{pem,key} from pdm-config to regenerate."
+    exit 1
+  fi
+  if ! cert_iss="$(openssl x509 -in "${CERT}" -noout -issuer -nameopt RFC2253 2>&1)"; then
+    warn "openssl could not read issuer from ${CERT}: ${cert_iss}"
+    exit 1
+  fi
+  cert_cn="$(printf '%s' "${cert_subj#subject=}" | grep -oE 'CN=[^,]+' | head -n1 | cut -d= -f2-)"
+  # SAN extension is optional; absence is legitimate (rare, but valid) and
+  # is correctly handled by `match=0` below. We do NOT want to fail-loud
+  # on a missing SAN — only on openssl itself misbehaving, which would
+  # surface as a non-empty stderr (it suppresses output but not exit).
   cert_san="$(openssl x509 -in "${CERT}" -noout -ext subjectAltName 2>/dev/null \
-              | tr ',' '\n' | grep -oE 'DNS:[^[:space:]]+' | cut -d: -f2- || true)"
+              | tr ',' '\n' | grep -oE 'DNS:[^[:space:]]+' | cut -d: -f2-)"
   is_self_signed=0
   [ -n "${cert_subj}" ] && [ "${cert_subj#subject=}" = "${cert_iss#issuer=}" ] && is_self_signed=1
   match=0

@@ -101,7 +101,7 @@ REGISTER_BODY="$(jq -nc \
      authid: $token_id, token: $token
    }')"
 
-if ! curl -fsS -k -X POST "${PDM_URL}/api2/json/remotes" \
+if ! curl -fsS -k -X POST "${PDM_URL}/api2/json/remotes/remote" \
       -H "Cookie: PDMAuthCookie=${PDM_TICKET}" \
       -H "CSRFPreventionToken: ${PDM_CSRF}" \
       -H 'Content-Type: application/json' \
@@ -124,7 +124,7 @@ log "ok — remote is visible"
 
 # ----- 5. query PVE through PDM ---------------------------------------------
 log "fetching nodes for ${REMOTE_NAME} via PDM proxy"
-if ! NODES="$(curl -fsS -k "${PDM_URL}/api2/json/resources/${REMOTE_NAME}/nodes" \
+if ! NODES="$(curl -fsS -k "${PDM_URL}/api2/json/remotes/${REMOTE_NAME}/nodes" \
                 -H "Cookie: PDMAuthCookie=${PDM_TICKET}")"; then
   fail "PDM could not proxy /nodes to ${REMOTE_NAME}" 3
 fi

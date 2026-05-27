@@ -128,13 +128,18 @@ jobs:
             "$IMAGE"
           trap 'docker logs pdm-smoke >&2 || true; docker rm -f pdm-smoke >/dev/null 2>&1 || true' EXIT
           for i in $(seq 1 60); do
-            if curl -fsSk https://127.0.0.1:18443/api2/json/ping >/dev/null 2>&1; then
-              echo "smoke: API ping ok after ${i}s"
+            body=$(curl -fsSk https://127.0.0.1:18443/api2/json/ping 2>/dev/null || true)
+            # Assert shape, not just status — a future PDM that 200s with
+            # an error page (stray reverse proxy, captive portal) wouldn't
+            # pass this. {"data":"pong"} is what /api2/json/ping returns.
+            if printf '%s' "$body" | grep -q '"data"[[:space:]]*:[[:space:]]*"pong"'; then
+              echo "smoke: API ping ok after ${i}s (payload verified)"
               break
             fi
             sleep 1
             if [ "$i" = "60" ]; then
-              echo "smoke: API ping never succeeded" >&2
+              echo "smoke: API ping never returned expected payload" >&2
+              echo "smoke: last response was: ${body:-<empty>}" >&2
               exit 1
             fi
           done

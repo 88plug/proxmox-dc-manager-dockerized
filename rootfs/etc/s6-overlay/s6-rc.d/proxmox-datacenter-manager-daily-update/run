@@ -6,6 +6,21 @@
 # then loop with 24h base + 0-5h jitter.
 set -e
 exec 2>&1
+
+DAILY_UPDATE_BIN=/usr/libexec/proxmox/proxmox-datacenter-manager-daily-update
+
+# Distinguish "PDM upstream renamed the binary" (fatal — s6 restart-loop
+# makes the failure visible immediately) from "the binary ran and errored"
+# (transient — network blip, registry hiccup, etc.; tolerated by `|| true`).
+# Without the existence check, a future relocation of the binary would
+# silently no-op the Updates panel forever.
+if [ ! -x "$DAILY_UPDATE_BIN" ]; then
+  echo "[daily-update] FATAL: ${DAILY_UPDATE_BIN} missing or not executable" >&2
+  echo "[daily-update]   Upstream PDM may have moved it (e.g. /usr/lib/proxmox/...)" >&2
+  echo "[daily-update]   The image is stale; bump the ISO pin." >&2
+  exit 1
+fi
+
 i=0
 while [ ! -S /run/proxmox-datacenter-manager/priv.sock ]; do
   i=$((i+1))
@@ -14,10 +29,10 @@ while [ ! -S /run/proxmox-datacenter-manager/priv.sock ]; do
 done
 sleep 30
 echo "[daily-update] initial run on container start"
-/usr/libexec/proxmox/proxmox-datacenter-manager-daily-update || true
+"$DAILY_UPDATE_BIN" || true
 while :; do
   jitter=$(( $(od -An -N2 -tu2 < /dev/urandom) % 18000 ))
   sleep $(( 86400 + jitter ))
   echo "[daily-update] scheduled run"
-  /usr/libexec/proxmox/proxmox-datacenter-manager-daily-update || true
+  "$DAILY_UPDATE_BIN" || true
 done
