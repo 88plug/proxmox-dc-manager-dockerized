@@ -27,7 +27,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Find and merge if Dependabot, non-major
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const headSha = context.payload.workflow_run.head_sha;

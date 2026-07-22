@@ -28,8 +28,8 @@ services:
       context: .
       args:
         # Override these to pin a different ISO release.
-        PDM_ISO_URL: http://download.proxmox.com/iso/proxmox-datacenter-manager_1.0-2.iso
-        PDM_ISO_SHA256: b4b98ed3e8f4dabb1151ebb713d6e7109aeba00d95b88bf65f954dd9ef1e89e1
+        PDM_ISO_URL: http://download.proxmox.com/iso/proxmox-datacenter-manager_1.1-1.iso
+        PDM_ISO_SHA256: 11a55a069ba564220bd986241b57920a83781d40be18d6f2bf7b9b12696ae2cc
     image: proxmox-dc-manager:local
     container_name: proxmox-dc-manager
     hostname: pdm

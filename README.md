@@ -14,8 +14,8 @@ The build extracts the squashfs root and apt repository from the official PDM IS
 - Volumes: `pdm-config` (`/etc/proxmox-datacenter-manager`), `pdm-data` (`/var/lib/proxmox-datacenter-manager`)
 - Tmpfs: `/run/proxmox-datacenter-manager`
 - Architecture: `linux/amd64` only (PDM has no upstream arm64 build)
-- ISO: `proxmox-datacenter-manager_1.0-2.iso` (PDM 1.0.2, ISO Refresh 2025-12-10), 1.37 GB
-  - sha256 `b4b98ed3e8f4dabb1151ebb713d6e7109aeba00d95b88bf65f954dd9ef1e89e1`
+- ISO: `proxmox-datacenter-manager_1.1-1.iso` (PDM 1.1, ISO release 1)
+  - sha256 `11a55a069ba564220bd986241b57920a83781d40be18d6f2bf7b9b12696ae2cc`
   - GPG-signed by `24B30F06ECC1836A4E5EFECBA7BCD1420BFE778E` (Proxmox Trixie Release Key); the build verifies the detached signature with gpgv before unpacking
 
 ## Quickstart
@@ -283,7 +283,7 @@ Tradeoff: hermeticity loosens. Two builds on different days with the same pinned
 - **x86_64 only.** No upstream arm64 builds; do not attempt to run on Apple Silicon or Raspberry Pi hosts.
 - **Not for production.** PDM is officially deployed via the Proxmox ISO/apt repository onto a real Debian host. This image exists for homelab and lab-test scenarios.
 - **No high availability.** PDM's HA features assume a real Proxmox cluster substrate and are not meaningful inside a single container.
-- **No notifications yet.** PDM 1.0 does not implement the Notifications subsystem (no SMTP/Gotify/webhook endpoint API exists upstream — see <https://pdm.proxmox.com/docs/roadmap.html>). When upstream lands the feature, the SMTP target dials the relay directly and requires no local MTA — this image will work as-is.
+- **No notifications yet.** PDM (as of 1.1) does not implement the Notifications subsystem (no SMTP/Gotify/webhook endpoint API exists upstream — see <https://pdm.proxmox.com/docs/roadmap.html>). When upstream lands the feature, the SMTP target dials the relay directly and requires no local MTA — this image will work as-is.
 - **Subscription warning popup on login.** PDM aggregates remote subscriptions; with zero remotes (or all-community remotes), the UI shows a one-time "no valid subscription" warning. Expected upstream behavior, not caused by the container repackaging. Adding any Proxmox VE/PBS remote with an active Basic+ subscription clears it.
 - **DNS / Time / Network panels show transient state.** Edits made through these panels go to `/etc/resolv.conf`, `/etc/localtime`, `/etc/network/interfaces` — files that Docker bind-mounts or that we don't honor. Configure DNS/timezone via Docker (host `/etc/resolv.conf`, `TZ` env var) and don't edit the panels.
 - **Self-managed log rotation.** PDM rotates its own `access.log`/`auth.log`/task archive every minute via an internal logrotate task. No host-side `logrotate` is needed.

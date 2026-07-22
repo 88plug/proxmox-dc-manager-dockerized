@@ -48,17 +48,17 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -66,7 +66,7 @@ jobs:
 
       - name: Derive image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -78,6 +78,15 @@ jobs:
             type=schedule,pattern=edge
             type=schedule,pattern=weekly-{{date 'YYYYMMDD'}}
             type=sha,format=short
+          # Overwrite metadata-action's repo-derived defaults for these keys.
+          # Without this they override the Dockerfile LABELs on the published
+          # image (GitHub-detected license = MIT, title = repo name,
+          # description = repo About). Keep in sync with the LABEL block in
+          # the Dockerfile.
+          labels: |
+            org.opencontainers.image.title=Proxmox Datacenter Manager (community Docker repackaging)
+            org.opencontainers.image.description=Unofficial Docker repackaging of the official Proxmox Datacenter Manager ISO. Not affiliated with Proxmox Server Solutions GmbH. 'Proxmox' is a trademark of Proxmox Server Solutions GmbH.
+            org.opencontainers.image.licenses=AGPL-3.0-or-later AND GPL-2.0-or-later AND GPL-3.0-or-later AND LGPL-2.1-or-later AND MIT AND ISC AND BSD-3-Clause AND Apache-2.0
 
       - name: Resolve build args
         id: args
@@ -87,11 +96,11 @@ jobs:
 
       - name: Install Cosign
         if: github.event_name != 'pull_request'
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@v4
 
       - name: Build and push
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
@@ -162,14 +171,14 @@ jobs:
 
       - name: Attest SLSA build provenance
         if: github.event_name != 'pull_request'
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
       - name: Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
           format: sarif
@@ -181,7 +190,7 @@ jobs:
 
       - name: Upload Trivy SARIF to GitHub Security tab
         if: github.event_name != 'pull_request'
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-results.sarif
           category: trivy
@@ -191,9 +200,9 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: hadolint
-        uses: hadolint/hadolint-action@v3.1.0
+        uses: hadolint/hadolint-action@v3.3.0
         with:
           dockerfile: Dockerfile
           failure-threshold: warning

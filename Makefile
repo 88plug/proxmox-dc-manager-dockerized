@@ -13,11 +13,16 @@ help: ## Show this help.
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
 # IMAGE_SOURCE_URL is the OCI image.source label — should point at this repo.
-# Override on the command line if your local clone isn't a GitHub remote.
-IMAGE_SOURCE_URL ?= $(shell git config --get remote.origin.url 2>/dev/null \
-	| sed -E 's|^git@github\.com:|https://github.com/|; s|\.git$$||' \
+# Derived once from the git remote (scp-style git@host:path and ssh:// forms
+# are normalized to https). Empty when there is no remote or the form isn't
+# recognized — the labels then render empty instead of pointing at a wrong
+# URL. Override on the command line to force a value.
+ifeq ($(origin IMAGE_SOURCE_URL), undefined)
+IMAGE_SOURCE_URL := $(shell git config --get remote.origin.url 2>/dev/null \
+	| sed -E 's|^git@([^:/]+):|https://\1/|; s|^ssh://git@([^:/]+)(:[0-9]+)?/|https://\1/|; s|\.git$$||' \
 	| grep -E '^https?://' \
-	|| echo "https://github.com")
+	|| true)
+endif
 
 build: ## Build the Docker image (extractor stage downloads the ISO automatically).
 	DOCKER_BUILDKIT=1 docker compose build \

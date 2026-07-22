@@ -31,12 +31,12 @@ jobs:
     permissions:
       contents: write   # to push commit + tag
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Detect newest published ISO
         id: detect
@@ -115,15 +115,24 @@ jobs:
           CURRENT_SHA: ${{ steps.detect.outputs.current_sha }}
           LATEST_ISO:  ${{ steps.detect.outputs.latest_iso }}
           NEW_SHA:     ${{ steps.detect.outputs.new_sha }}
+          LATEST_VER:  ${{ steps.detect.outputs.latest_ver }}
         run: |
           set -euo pipefail
-          for f in Dockerfile compose.yaml README.md; do
+          for f in Dockerfile compose.yaml README.md REPRODUCIBILITY.md; do
             sed -i "s|${CURRENT_ISO}|${LATEST_ISO}|g" "$f"
           done
           sed -i "s|PDM_ISO_SHA256=${CURRENT_SHA}|PDM_ISO_SHA256=${NEW_SHA}|"  Dockerfile
           sed -i "s|PDM_ISO_SHA256: ${CURRENT_SHA}|PDM_ISO_SHA256: ${NEW_SHA}|" compose.yaml
           sed -i "s|\`${CURRENT_SHA}\`|\`${NEW_SHA}\`|"                         README.md
-          git --no-pager diff -- Dockerfile compose.yaml README.md
+          # Keep the filename-derivable OCI labels and the README version text
+          # from rotting on auto-bumps. iso.kernel / iso.debian are NOT
+          # derivable from the filename and stay manual (see Dockerfile).
+          rel="${LATEST_VER%-*}"; isorel="${LATEST_VER##*-}"
+          sed -i -E "s|(org.opencontainers.image.version=\")[^\"]+|\1${rel}-iso${isorel}|" Dockerfile
+          sed -i -E "s|(com.proxmox.iso.release=\")[^\"]+|\1${rel}|"                Dockerfile
+          sed -i -E "s|(com.proxmox.iso.isorelease=\")[^\"]+|\1${isorel}|"          Dockerfile
+          sed -i -E "s|PDM [0-9.]+, ISO release [0-9]+|PDM ${rel}, ISO release ${isorel}|" README.md
+          git --no-pager diff -- Dockerfile compose.yaml README.md REPRODUCIBILITY.md
 
       - name: Verification build (exercises full GPG + smoke)
         if: steps.detect.outputs.needs_bump == 'true'
@@ -164,7 +173,7 @@ jobs:
           set -euo pipefail
           git config user.name  "iso-bump-bot"
           git config user.email "iso-bump-bot@users.noreply.github.com"
-          git add Dockerfile compose.yaml README.md
+          git add Dockerfile compose.yaml README.md REPRODUCIBILITY.md
           git commit -m "chore: bump PDM ISO ${OLD_VER} → ${NEW_VER}
 
           Auto-detected by .github/workflows/iso-bump-detector.yml and

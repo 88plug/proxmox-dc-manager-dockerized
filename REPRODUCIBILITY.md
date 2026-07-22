@@ -8,7 +8,7 @@ A build is uniquely determined by:
 
 | Input                                | Pinning                                                                                 | Drift risk                    |
 | ------------------------------------ | --------------------------------------------------------------------------------------- | ----------------------------- |
-| `proxmox-datacenter-manager_1.0-2.iso` | sha256 in Dockerfile (`PDM_ISO_SHA256`) + GPG signature (`PROXMOX_KEY_FPR`)             | Frozen by Proxmox until next release |
+| `proxmox-datacenter-manager_1.1-1.iso` | sha256 in Dockerfile (`PDM_ISO_SHA256`) + GPG signature (`PROXMOX_KEY_FPR`)             | Frozen by Proxmox until next release |
 | Proxmox Trixie release GPG key       | sha256 in Dockerfile (`PROXMOX_KEY_SHA256`) + fingerprint check                          | Frozen until Proxmox rotates the key |
 | s6-overlay v3                        | Version in Dockerfile (`S6_OVERLAY_VERSION`) + sha256 sidecar from upstream release      | Frozen until we bump          |
 | `debian:trixie-slim` (extractor)     | Tag only — Docker pulls the current digest unless `make refresh` or `--pull`             | Daily drift                   |

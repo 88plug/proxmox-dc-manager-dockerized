@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1
 #
 # Proxmox Datacenter Manager (PDM) — Dockerized (all-in-one)
 # Self-contained build: the extractor stage downloads the official Proxmox
@@ -20,8 +20,8 @@
 # ===========================================================================
 FROM debian:trixie-slim AS extractor
 
-ARG PDM_ISO_URL=http://download.proxmox.com/iso/proxmox-datacenter-manager_1.0-2.iso
-ARG PDM_ISO_SHA256=b4b98ed3e8f4dabb1151ebb713d6e7109aeba00d95b88bf65f954dd9ef1e89e1
+ARG PDM_ISO_URL=http://download.proxmox.com/iso/proxmox-datacenter-manager_1.1-1.iso
+ARG PDM_ISO_SHA256=11a55a069ba564220bd986241b57920a83781d40be18d6f2bf7b9b12696ae2cc
 # Proxmox Trixie release signing key. Fetched live, but sha256-pinned and the
 # OpenPGP fingerprint is re-verified after import. Rotation = bump both pins.
 # Key fingerprint: 24B30F06ECC1836A4E5EFECBA7BCD1420BFE778E
@@ -130,14 +130,15 @@ ARG GIT_REVISION=""
 ARG BUILD_DATE=""
 # URL to the *packaging* source (this repo). The OCI spec defines
 # `image.source` as the URL to find the build instructions, NOT the upstream
-# product page. Defaults to GitHub's homepage when no explicit override is
-# supplied at build time; CI fills it in via `${{ github.server_url }}/${{
+# product page. Empty by default — the source/url/documentation labels render
+# empty rather than pointing at a wrong URL. The Makefile derives it from the
+# git remote; CI fills it in via `${{ github.server_url }}/${{
 # github.repository }}`. Distinct from `com.proxmox.upstream.source` below,
 # which points to the AGPL-required upstream PDM source.
-ARG IMAGE_SOURCE_URL="https://github.com"
+ARG IMAGE_SOURCE_URL=""
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    S6_OVERLAY_VERSION=3.2.0.2 \
+    S6_OVERLAY_VERSION=3.2.3.2 \
     S6_KEEP_ENV=1 \
     S6_BEHAVIOUR_IF_STAGE2_FAILS=2 \
     S6_VERBOSITY=1 \
@@ -274,18 +275,21 @@ RUN set -eux; \
            /usr/share/info/* /usr/share/grub /usr/lib/grub \
            /var/lib/apt/lists/* /var/cache/apt/archives/*.deb \
            /var/log/* /srv/pdm-pool /tmp/*; \
-    # /usr/share/doc/*: keep each package's copyright, SOURCE pointer, and
-    # changelog. These are the Debian DEP-5 license artifacts that satisfy
-    # AGPL §6 (license-and-source-availability) for the AGPL'd Proxmox bits
-    # we redistribute, plus the equivalent disclosures for every other
-    # bundled package. Deleting them was the only license-compliance gap in
-    # the image; keeping ~500 KB of copyright files closes it.
-    find /usr/share/doc -mindepth 2 -type f \
-        ! -name copyright \
-        ! -name SOURCE \
-        ! -name 'changelog*' \
-        -delete; \
-    find /usr/share/doc -mindepth 1 -type d -empty -delete; \
+    # /usr/share/doc/*: keep each package's copyright and SOURCE pointer.
+    # These are the Debian DEP-5 license artifacts that satisfy AGPL §6
+    # (license-and-source-availability) for the AGPL'd Proxmox bits we
+    # redistribute, plus the equivalent disclosures for every other bundled
+    # package. Deleting them was the only license-compliance gap in the
+    # image; keeping ~500 KB of copyright files closes it. Changelogs are
+    # version history, not license artifacts — not kept. Guard on the dir:
+    # under `set -eux` a bare find on a missing path would abort the build.
+    if [ -d /usr/share/doc ]; then \
+        find /usr/share/doc -mindepth 2 -type f \
+            ! -name copyright \
+            ! -name SOURCE \
+            -delete; \
+        find /usr/share/doc -mindepth 1 -type d -empty -delete; \
+    fi; \
     # The local pool is gone; nuke the apt source that referenced it so future
     # apt-get update calls don't fail. Also drop debian.sources so PDM's
     # "Updates" panel and apt-get update API endpoint don't hit deb.debian.org
@@ -376,22 +380,29 @@ ENTRYPOINT ["/init"]
 # ---------------------------------------------------------------------------
 # 9. OCI / Proxmox metadata.
 # ---------------------------------------------------------------------------
+# version / iso.release / iso.isorelease are auto-updated by
+# iso-bump-detector.yml on ISO bumps (derivable from the ISO filename).
+# iso.kernel / iso.debian are NOT derivable from the filename — update them
+# manually from the Proxmox release notes when bumping by hand.
+# licenses: principal licenses only — a full per-package disclosure ships in
+# NOTICES.md and /usr/share/doc/*/copyright inside the image. Keep this value
+# in sync with the metadata-action `labels:` override in build-and-sign.yml.
 LABEL org.opencontainers.image.title="Proxmox Datacenter Manager (community Docker repackaging)" \
-      org.opencontainers.image.description="Unofficial Docker repackaging of the official Proxmox Datacenter Manager 1.0 ISO. Not affiliated with Proxmox Server Solutions GmbH. 'Proxmox' is a trademark of Proxmox Server Solutions GmbH." \
-      org.opencontainers.image.version="1.0-iso2" \
+      org.opencontainers.image.description="Unofficial Docker repackaging of the official Proxmox Datacenter Manager ISO. Not affiliated with Proxmox Server Solutions GmbH. 'Proxmox' is a trademark of Proxmox Server Solutions GmbH." \
+      org.opencontainers.image.version="1.1-iso1" \
       org.opencontainers.image.revision="${GIT_REVISION}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.vendor="Community-maintained (unofficial)" \
       org.opencontainers.image.authors="proxmox-dc-manager-dockerized contributors" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later AND MIT AND ISC" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later AND GPL-2.0-or-later AND GPL-3.0-or-later AND LGPL-2.1-or-later AND MIT AND ISC AND BSD-3-Clause AND Apache-2.0" \
       org.opencontainers.image.source="${IMAGE_SOURCE_URL}" \
       org.opencontainers.image.url="${IMAGE_SOURCE_URL}" \
-      org.opencontainers.image.documentation="${IMAGE_SOURCE_URL}#readme" \
+      org.opencontainers.image.documentation="${IMAGE_SOURCE_URL:+${IMAGE_SOURCE_URL}#readme}" \
       com.proxmox.product="pdm" \
-      com.proxmox.iso.release="1.0" \
-      com.proxmox.iso.isorelease="2" \
-      com.proxmox.iso.kernel="6.17" \
-      com.proxmox.iso.debian="13.2-trixie" \
+      com.proxmox.iso.release="1.1" \
+      com.proxmox.iso.isorelease="1" \
+      com.proxmox.iso.kernel="7.0" \
+      com.proxmox.iso.debian="13.5-trixie" \
       com.proxmox.upstream.source="https://git.proxmox.com/?p=proxmox-datacenter-manager.git;a=summary" \
       com.proxmox.upstream.url="https://pdm.proxmox.com/" \
       com.proxmox.upstream.documentation="https://pdm.proxmox.com/docs/" \
