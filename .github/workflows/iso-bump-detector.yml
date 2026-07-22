@@ -42,6 +42,8 @@ jobs:
 
       - name: Detect newest published ISO
         id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -77,6 +79,24 @@ jobs:
           echo "current=$current_iso  latest=$latest_iso"
 
           if [ "$current_iso" = "$latest_iso" ]; then
+            # Pin is current — but self-heal before exiting: if a prior run
+            # tagged a release and its publish (the dispatched build-and-sign
+            # run) failed transiently, the versioned image never appears in
+            # GHCR and nothing would ever retry it. Check the registry and
+            # re-dispatch if the release manifest is missing.
+            repo_lc=$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+            tok=$(curl -fsSL "https://ghcr.io/token?scope=repository:${repo_lc}:pull" | jq -r .token)
+            if ! curl -fsS -o /dev/null \
+                 -H "Authorization: Bearer $tok" \
+                 -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json" \
+                 "https://ghcr.io/v2/${repo_lc}/manifests/${current_ver}"; then
+              if git ls-remote --exit-code --tags origin "v${current_ver}" >/dev/null 2>&1; then
+                echo "release image ${current_ver} missing from GHCR — re-dispatching build-and-sign at v${current_ver}"
+                gh workflow run build-and-sign.yml --ref "v${current_ver}"
+              else
+                echo "no v${current_ver} tag published yet — nothing to heal"
+              fi
+            fi
             echo "needs_bump=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -127,13 +147,19 @@ jobs:
           sed -i "s|PDM_ISO_SHA256: ${CURRENT_SHA}|PDM_ISO_SHA256: ${NEW_SHA}|" compose.yaml
           sed -i "s|\`${CURRENT_SHA}\`|\`${NEW_SHA}\`|"                         README.md
           # Keep the filename-derivable OCI labels and the README version text
-          # from rotting on auto-bumps. iso.kernel / iso.debian are NOT
-          # derivable from the filename and stay manual (see Dockerfile).
+          # from rotting on auto-bumps. sed exits 0 on no-match, so each
+          # rewrite is asserted below — a reflowed LABEL block or README edit
+          # fails this run loudly instead of publishing a stale label.
           rel="${LATEST_VER%-*}"; isorel="${LATEST_VER##*-}"
           sed -i -E "s|(org.opencontainers.image.version=\")[^\"]+|\1${rel}-iso${isorel}|" Dockerfile
           sed -i -E "s|(com.proxmox.iso.release=\")[^\"]+|\1${rel}|"                Dockerfile
           sed -i -E "s|(com.proxmox.iso.isorelease=\")[^\"]+|\1${isorel}|"          Dockerfile
           sed -i -E "s|PDM [0-9.]+, ISO release [0-9]+|PDM ${rel}, ISO release ${isorel}|" README.md
+          grep -q "org.opencontainers.image.version=\"${rel}-iso${isorel}\"" Dockerfile \
+            && grep -q "com.proxmox.iso.release=\"${rel}\"" Dockerfile \
+            && grep -q "com.proxmox.iso.isorelease=\"${isorel}\"" Dockerfile \
+            && grep -q "PDM ${rel}, ISO release ${isorel}" README.md \
+            || { echo "FATAL: a label/README sed matched nothing — file format changed; update the seds in this workflow" >&2; exit 1; }
           git --no-pager diff -- Dockerfile compose.yaml README.md REPRODUCIBILITY.md
 
       - name: Verification build (exercises full GPG + smoke)
@@ -198,5 +224,6 @@ jobs:
             gh workflow run build-and-sign.yml --ref "$tag"
             echo "tagged $tag and dispatched build-and-sign at it"
           else
-            echo "tag $tag already exists; skipping"
+            echo "tag $tag already exists — re-dispatching build-and-sign at it (publish is idempotent)"
+            gh workflow run build-and-sign.yml --ref "$tag"
           fi

@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.25
 #
 # Proxmox Datacenter Manager (PDM) — Dockerized (all-in-one)
 # Self-contained build: the extractor stage downloads the official Proxmox
@@ -130,12 +130,12 @@ ARG GIT_REVISION=""
 ARG BUILD_DATE=""
 # URL to the *packaging* source (this repo). The OCI spec defines
 # `image.source` as the URL to find the build instructions, NOT the upstream
-# product page. Empty by default — the source/url/documentation labels render
-# empty rather than pointing at a wrong URL. The Makefile derives it from the
-# git remote; CI fills it in via `${{ github.server_url }}/${{
-# github.repository }}`. Distinct from `com.proxmox.upstream.source` below,
-# which points to the AGPL-required upstream PDM source.
-ARG IMAGE_SOURCE_URL=""
+# product page. Defaults to the canonical repo; forks get the right value
+# automatically from the Makefile's git-remote derivation, and CI passes
+# `${{ github.server_url }}/${{ github.repository }}`. Distinct from
+# `com.proxmox.upstream.source` below, which points to the AGPL-required
+# upstream PDM source.
+ARG IMAGE_SOURCE_URL="https://github.com/88plug/proxmox-dc-manager-dockerized"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     S6_OVERLAY_VERSION=3.2.3.2 \
@@ -380,13 +380,16 @@ ENTRYPOINT ["/init"]
 # ---------------------------------------------------------------------------
 # 9. OCI / Proxmox metadata.
 # ---------------------------------------------------------------------------
+# This LABEL block is the single source of truth for image metadata — CI
+# deliberately does NOT pass metadata-action labels to build-push-action, so
+# nothing overrides these on published images.
 # version / iso.release / iso.isorelease are auto-updated by
-# iso-bump-detector.yml on ISO bumps (derivable from the ISO filename).
-# iso.kernel / iso.debian are NOT derivable from the filename — update them
-# manually from the Proxmox release notes when bumping by hand.
+# iso-bump-detector.yml on ISO bumps (derivable from the ISO filename; the
+# bump step asserts each sed landed). No kernel/debian-point-release labels:
+# the image ships no kernel, and dist-upgrade makes any point-release claim
+# stale by design — don't encode facts that rot unattended.
 # licenses: principal licenses only — a full per-package disclosure ships in
-# NOTICES.md and /usr/share/doc/*/copyright inside the image. Keep this value
-# in sync with the metadata-action `labels:` override in build-and-sign.yml.
+# NOTICES.md and /usr/share/doc/*/copyright inside the image.
 LABEL org.opencontainers.image.title="Proxmox Datacenter Manager (community Docker repackaging)" \
       org.opencontainers.image.description="Unofficial Docker repackaging of the official Proxmox Datacenter Manager ISO. Not affiliated with Proxmox Server Solutions GmbH. 'Proxmox' is a trademark of Proxmox Server Solutions GmbH." \
       org.opencontainers.image.version="1.1-iso1" \
@@ -401,8 +404,6 @@ LABEL org.opencontainers.image.title="Proxmox Datacenter Manager (community Dock
       com.proxmox.product="pdm" \
       com.proxmox.iso.release="1.1" \
       com.proxmox.iso.isorelease="1" \
-      com.proxmox.iso.kernel="7.0" \
-      com.proxmox.iso.debian="13.5-trixie" \
       com.proxmox.upstream.source="https://git.proxmox.com/?p=proxmox-datacenter-manager.git;a=summary" \
       com.proxmox.upstream.url="https://pdm.proxmox.com/" \
       com.proxmox.upstream.documentation="https://pdm.proxmox.com/docs/" \

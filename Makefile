@@ -14,14 +14,14 @@ help: ## Show this help.
 
 # IMAGE_SOURCE_URL is the OCI image.source label — should point at this repo.
 # Derived once from the git remote (scp-style git@host:path and ssh:// forms
-# are normalized to https). Empty when there is no remote or the form isn't
-# recognized — the labels then render empty instead of pointing at a wrong
-# URL. Override on the command line to force a value.
+# are normalized to https); falls back to the canonical repo when there is no
+# remote or the form isn't recognized, so the label always carries a value.
+# Override on the command line to force one.
 ifeq ($(origin IMAGE_SOURCE_URL), undefined)
 IMAGE_SOURCE_URL := $(shell git config --get remote.origin.url 2>/dev/null \
 	| sed -E 's|^git@([^:/]+):|https://\1/|; s|^ssh://git@([^:/]+)(:[0-9]+)?/|https://\1/|; s|\.git$$||' \
 	| grep -E '^https?://' \
-	|| true)
+	|| echo "https://github.com/88plug/proxmox-dc-manager-dockerized")
 endif
 
 build: ## Build the Docker image (extractor stage downloads the ISO automatically).

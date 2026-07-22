@@ -11,6 +11,7 @@ A build is uniquely determined by:
 | `proxmox-datacenter-manager_1.1-1.iso` | sha256 in Dockerfile (`PDM_ISO_SHA256`) + GPG signature (`PROXMOX_KEY_FPR`)             | Frozen by Proxmox until next release |
 | Proxmox Trixie release GPG key       | sha256 in Dockerfile (`PROXMOX_KEY_SHA256`) + fingerprint check                          | Frozen until Proxmox rotates the key |
 | s6-overlay v3                        | Version in Dockerfile (`S6_OVERLAY_VERSION`) + sha256 sidecar from upstream release      | Frozen until we bump          |
+| BuildKit Dockerfile frontend         | Minor pin — `# syntax=docker/dockerfile:1.25`; bump deliberately, note in commit         | Frozen until we bump          |
 | `debian:trixie-slim` (extractor)     | Tag only — Docker pulls the current digest unless `make refresh` or `--pull`             | Daily drift                   |
 | `deb.debian.org` package versions    | Resolved at build time during `apt-get install` and `apt-get dist-upgrade`              | Drifts every Debian point/security release |
 | Project source (`rootfs/`, Dockerfile) | Git commit — `org.opencontainers.image.revision` label                                  | Frozen by commit              |

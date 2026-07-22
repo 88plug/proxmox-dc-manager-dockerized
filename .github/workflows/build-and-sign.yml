@@ -86,15 +86,6 @@ jobs:
             type=schedule,pattern=edge
             type=schedule,pattern=weekly-{{date 'YYYYMMDD'}}
             type=sha,format=short
-          # Overwrite metadata-action's repo-derived defaults for these keys.
-          # Without this they override the Dockerfile LABELs on the published
-          # image (GitHub-detected license = MIT, title = repo name,
-          # description = repo About). Keep in sync with the LABEL block in
-          # the Dockerfile.
-          labels: |
-            org.opencontainers.image.title=Proxmox Datacenter Manager (community Docker repackaging)
-            org.opencontainers.image.description=Unofficial Docker repackaging of the official Proxmox Datacenter Manager ISO. Not affiliated with Proxmox Server Solutions GmbH. 'Proxmox' is a trademark of Proxmox Server Solutions GmbH.
-            org.opencontainers.image.licenses=AGPL-3.0-or-later AND GPL-2.0-or-later AND GPL-3.0-or-later AND LGPL-2.1-or-later AND MIT AND ISC AND BSD-3-Clause AND Apache-2.0
 
       - name: Resolve build args
         id: args
@@ -115,7 +106,10 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           load: ${{ github.event_name == 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          # Deliberately NOT passing steps.meta.outputs.labels: metadata-action's
+          # repo-derived defaults (licenses = GitHub-detected MIT, title = repo
+          # name, version = git ref) would override the Dockerfile LABEL block,
+          # which is the single source of truth for image metadata.
           build-args: |
             GIT_REVISION=${{ steps.args.outputs.git_revision }}
             BUILD_DATE=${{ steps.args.outputs.build_date }}

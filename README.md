@@ -12,7 +12,7 @@ The build downloads the official PDM ISO exactly once (sha256-pinned, GPG signat
 
 ## At a glance
 
-- Base: `pdm-base.squashfs` extracted from the PDM ISO (Debian Trixie 13.5)
+- Base: `pdm-base.squashfs` extracted from the PDM ISO (Debian Trixie, rolled forward to current point release at build time)
 - Supervisor: s6-overlay v3 (no systemd, no `--privileged` required)
 - Web UI: HTTPS on port `8443`
 - Volumes: `pdm-config` (`/etc/proxmox-datacenter-manager`), `pdm-data` (`/var/lib/proxmox-datacenter-manager`)
