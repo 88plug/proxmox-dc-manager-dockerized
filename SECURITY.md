@@ -45,21 +45,21 @@ What is **not** in the trust model:
 
 ## Verifying a release
 
-The CI-published image at `ghcr.io/<org>/proxmox-dc-manager` carries:
+The CI-published image at `ghcr.io/88plug/proxmox-dc-manager-dockerized` carries:
 
 1. **OCI image signature** via Cosign keyless OIDC. Verify:
    ```
-   cosign verify ghcr.io/<org>/proxmox-dc-manager:<tag> \
-     --certificate-identity-regexp 'https://github.com/<org>/.*' \
+   cosign verify ghcr.io/88plug/proxmox-dc-manager-dockerized:<tag> \
+     --certificate-identity-regexp 'https://github.com/88plug/.*' \
      --certificate-oidc-issuer https://token.actions.githubusercontent.com
    ```
 2. **SLSA build provenance**. Verify:
    ```
-   gh attestation verify oci://ghcr.io/<org>/proxmox-dc-manager:<tag> --owner <org>
+   gh attestation verify oci://ghcr.io/88plug/proxmox-dc-manager-dockerized:<tag> --owner 88plug
    ```
 3. **SBOM** (CycloneDX) attached as an OCI referrer. Inspect with:
    ```
-   cosign download sbom ghcr.io/<org>/proxmox-dc-manager:<tag>
+   cosign download sbom ghcr.io/88plug/proxmox-dc-manager-dockerized:<tag>
    ```
 
 For local builds, the build itself runs the ISO sha256 + GPG verification before unpacking, so the same authenticity guarantees apply.
