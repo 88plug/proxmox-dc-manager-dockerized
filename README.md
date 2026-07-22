@@ -2,13 +2,17 @@
 
 A community-maintained Docker repackaging of the official **Proxmox Datacenter Manager (PDM)** ISO. **This project is not affiliated with or endorsed by Proxmox Server Solutions GmbH.**
 
+[![build-and-sign](https://github.com/88plug/proxmox-dc-manager-dockerized/actions/workflows/build-and-sign.yml/badge.svg)](https://github.com/88plug/proxmox-dc-manager-dockerized/actions/workflows/build-and-sign.yml)
+[![release](https://img.shields.io/github/v/tag/88plug/proxmox-dc-manager-dockerized?label=release&color=informational)](https://github.com/88plug/proxmox-dc-manager-dockerized/tags)
+[![packaging license](https://img.shields.io/badge/packaging-MIT-green)](LICENSE)
+
 ## Why this approach
 
-The build extracts the squashfs root and apt repository from the official PDM ISO and uses them as the sole sources for image construction. That makes the image hermetic and version-pinned to a specific ISO release: no calls to `download.proxmox.com` at build time, no risk of pulling a mismatched `proxmox-datacenter-manager` against a stale Debian Trixie snapshot, and a single source of truth for what's installed. When Proxmox publishes a new ISO, you bump one URL and one checksum.
+The build downloads the official PDM ISO exactly once (sha256-pinned, GPG signature verified against the pinned Proxmox release key, cached as a Docker layer) and then uses its squashfs root and embedded apt pool as the sole sources for PDM package installation. That version-pins the image to a specific ISO release: no risk of pulling a mismatched `proxmox-datacenter-manager` against a stale Debian Trixie snapshot, and a single source of truth for what's installed. The Debian base is then rolled forward to current Trixie security state in a documented, deliberate step (see `REPRODUCIBILITY.md` for the tradeoff). When Proxmox publishes a new ISO, [the daily bump detector](.github/workflows/iso-bump-detector.yml) updates the pins, verifies the build end to end, and publishes the release — no human in the loop.
 
 ## At a glance
 
-- Base: `pdm-base.squashfs` extracted from the PDM ISO (Debian Trixie 13.2)
+- Base: `pdm-base.squashfs` extracted from the PDM ISO (Debian Trixie 13.5)
 - Supervisor: s6-overlay v3 (no systemd, no `--privileged` required)
 - Web UI: HTTPS on port `8443`
 - Volumes: `pdm-config` (`/etc/proxmox-datacenter-manager`), `pdm-data` (`/var/lib/proxmox-datacenter-manager`)
@@ -20,8 +24,20 @@ The build extracts the squashfs root and apt repository from the official PDM IS
 
 ## Quickstart
 
+Prebuilt image (signed, attested — see `SECURITY.md` to verify):
+
 ```sh
-git clone <repo>
+docker run -d --name pdm -p 8443:8443 \
+  -e PDM_ROOT_PASSWORD=changeme \
+  -v pdm-config:/etc/proxmox-datacenter-manager \
+  -v pdm-data:/var/lib/proxmox-datacenter-manager \
+  ghcr.io/88plug/proxmox-dc-manager-dockerized:latest
+```
+
+Or build from source:
+
+```sh
+git clone https://github.com/88plug/proxmox-dc-manager-dockerized.git
 cd proxmox-dc-manager-dockerized
 docker compose up -d --build
 ```
@@ -236,7 +252,7 @@ Named volumes are preserved across rebuilds, so configuration and remotes carry 
 
 The repository's GitHub Actions are designed to run for years without human attention. After the initial `git push`, no one needs to read email, review PRs, or click anything in GitHub.
 
-- **`.github/workflows/iso-bump-detector.yml`** — daily 04:17 UTC poll of `download.proxmox.com/iso/`. When a newer `proxmox-datacenter-manager_*.iso` appears, the workflow runs a full verification build (sha256 + GPG against the pinned Trixie release key + runtime smoke test on `/api2/json/ping`) and, only on success, pushes the pin bump directly to `main` and creates a `v<version>` tag. No PR, no human merge step. The tag push triggers `build-and-sign.yml` which publishes the signed and attested release image to GHCR.
+- **`.github/workflows/iso-bump-detector.yml`** — daily 04:17 UTC poll of `download.proxmox.com/iso/`. When a newer `proxmox-datacenter-manager_*.iso` appears, the workflow runs a full verification build (sha256 + GPG against the pinned Trixie release key + runtime smoke test on `/api2/json/ping`) and, only on success, pushes the pin bump directly to `main`, creates a `v<version>` tag, and dispatches `build-and-sign.yml` at that tag (GITHUB_TOKEN pushes deliberately never trigger workflows, so an explicit `workflow_dispatch` is required), which publishes the signed and attested release image to GHCR. No PR, no human merge step.
 - **`.github/workflows/build-and-sign.yml`** — fires on push/tag/PR and on a weekly cron (Sunday 03:17 UTC). The weekly run uses `--no-cache --pull` so the `:edge` tag picks up current Debian Trixie security updates without any commit. PR builds include a runtime smoke test (boot the image, poll `/api2/json/ping`) before the image is signed and pushed. All builds: SBOM, SLSA build provenance, Cosign keyless signing, Trivy scan to GitHub Security tab.
 - **`.github/dependabot.yml`** — weekly auto-PRs for GitHub Actions and `FROM` lines in the Dockerfile.
 - **`.github/workflows/dependabot-auto-merge.yml`** — listens for `build-and-sign` to finish on a Dependabot PR; if it passed and the PR is not a major version bump, merges via the REST API. Works without the "Allow auto-merge" repo setting. Major version bumps are left open as the one non-trivial human-review hook in the system.
@@ -246,7 +262,7 @@ The repository's GitHub Actions are designed to run for years without human atte
 
 The workflows function correctly with GitHub's default repo settings. If you want to harden further:
 
-- **Settings → Actions → General → Workflow permissions** — set to "Read and write permissions" (default on most accounts). Required so `iso-bump-detector.yml` can push to `main`.
+- **Settings → Actions → General → Workflow permissions** — no change needed: every workflow declares an explicit `permissions:` block, which overrides the repo-level default in either direction.
 - **Settings → General → Pull Requests → Automatically delete head branches** — optional cosmetic.
 - **Settings → General → Pull Requests → Allow auto-merge** — *not* required; `dependabot-auto-merge.yml` uses the REST API directly to bypass the need for this toggle.
 - **Branch protection on `main`** — leave off, or include `iso-bump-bot` in the bypass list. Strict required-reviewers will block the bot's pushes.

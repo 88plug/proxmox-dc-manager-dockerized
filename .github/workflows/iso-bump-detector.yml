@@ -14,7 +14,8 @@ name: iso-bump-detector
 # the same GPG check (against the same pinned key) that the runtime
 # build would, so a tampered ISO cannot reach main.
 #
-# The tag push triggers build-and-sign.yml's `tags: ['v*']` rule,
+# GITHUB_TOKEN pushes never trigger other workflows, so after tagging
+# the workflow explicitly dispatches build-and-sign.yml at the new tag,
 # which publishes the signed/attested/scanned versioned image to GHCR.
 
 on:
@@ -30,6 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write   # to push commit + tag
+      actions:  write   # to dispatch build-and-sign at the new tag
     steps:
       - uses: actions/checkout@v7
         with:
@@ -169,6 +171,7 @@ jobs:
           NEW_VER:  ${{ steps.detect.outputs.latest_ver }}
           OLD_VER:  ${{ steps.detect.outputs.current_ver }}
           NEW_SHA:  ${{ steps.detect.outputs.new_sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git config user.name  "iso-bump-bot"
@@ -187,7 +190,13 @@ jobs:
           if ! git rev-parse "$tag" >/dev/null 2>&1; then
             git tag "$tag"
             git push origin "$tag"
-            echo "tagged $tag — build-and-sign.yml will publish the release image"
+            # Pushes made with GITHUB_TOKEN never trigger other workflows
+            # (GitHub's recursion guard), so the tag push alone would NOT
+            # start build-and-sign and no release image would ever publish.
+            # workflow_dispatch is the documented exception — dispatch the
+            # publish run explicitly at the new tag ref.
+            gh workflow run build-and-sign.yml --ref "$tag"
+            echo "tagged $tag and dispatched build-and-sign at it"
           else
             echo "tag $tag already exists; skipping"
           fi

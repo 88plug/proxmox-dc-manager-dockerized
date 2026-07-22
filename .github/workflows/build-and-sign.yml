@@ -11,9 +11,11 @@ name: build-and-sign
 #     --certificate-oidc-issuer    https://token.actions.githubusercontent.com
 #
 # Trigger model:
-#   - push to main → tag "main", commit sha, build/sign
-#   - push tag vX.Y-isoN → tag the release, "latest", commit sha
-#   - manual workflow_dispatch → tag "manual-<run_id>"
+#   - push to main → tags "main", "latest", commit sha, build/sign
+#   - push tag vX.Y-N (or workflow_dispatch AT that tag ref, which is how
+#     iso-bump-detector publishes — its GITHUB_TOKEN tag pushes cannot
+#     trigger workflows) → tags "X.Y-N", "X.Y", "latest", commit sha
+#   - manual workflow_dispatch on main → same as a main push
 
 on:
   push:
@@ -72,9 +74,15 @@ jobs:
           tags: |
             type=ref,event=branch
             type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
+            # Release tags are vX.Y-N (ISO scheme) — NOT valid semver (no
+            # patch component), so type=semver would silently skip them and a
+            # release push would publish no version tag at all. type=match
+            # handles the actual scheme: v1.1-1 → "1.1-1" and "1.1".
+            type=match,pattern=^v(.+)$,group=1
+            type=match,pattern=^v(\d+\.\d+),group=1
+            # latest: on main pushes AND on release tags (a release is built
+            # from a workflow_dispatch at the tag ref — see iso-bump-detector).
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' }}
             type=schedule,pattern=edge
             type=schedule,pattern=weekly-{{date 'YYYYMMDD'}}
             type=sha,format=short
