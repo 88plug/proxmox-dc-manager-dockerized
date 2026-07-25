@@ -17,6 +17,10 @@ trivy-results.sarif
 # Build artifacts (the Dockerfile fetches the ISO itself)
 .iso-work/
 
+# README demo working raw (4K masters, VO wavs, peer clips, OODA ledgers) —
+# only the delivery docs/demo.{gif,mp4} are committed.
+docs/demo-raw/
+
 # Claude Code session state
 .claude/
 /tmp/pdm-build.log

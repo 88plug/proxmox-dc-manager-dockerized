@@ -6,6 +6,12 @@ A community-maintained Docker repackaging of the official **Proxmox Datacenter M
 [![release](https://img.shields.io/github/v/tag/88plug/proxmox-dc-manager-dockerized?label=release&color=informational)](https://github.com/88plug/proxmox-dc-manager-dockerized/tags)
 [![packaging license](https://img.shields.io/badge/packaging-MIT-green)](LICENSE)
 
+<!-- TODO(demo-video): drag docs/demo.mp4 into a GitHub editor box to mint a
+     user-attachments URL, then paste that URL here on its own line — only
+     user-attachments URLs render GitHub's inline video player. -->
+
+![Demo: docker compose up, log in as root, and the Proxmox Datacenter Manager dashboard appears with remotes, resource usage, and task summaries](docs/demo.gif)
+
 ## Why this approach
 
 The build downloads the official PDM ISO exactly once (sha256-pinned, GPG signature verified against the pinned Proxmox release key, cached as a Docker layer) and then uses its squashfs root and embedded apt pool as the sole sources for PDM package installation. That version-pins the image to a specific ISO release: no risk of pulling a mismatched `proxmox-datacenter-manager` against a stale Debian Trixie snapshot, and a single source of truth for what's installed. The Debian base is then rolled forward to current Trixie security state in a documented, deliberate step (see `REPRODUCIBILITY.md` for the tradeoff). When Proxmox publishes a new ISO, [the daily bump detector](.github/workflows/iso-bump-detector.yml) updates the pins, verifies the build end to end, and publishes the release — no human in the loop.
