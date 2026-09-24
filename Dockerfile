@@ -408,9 +408,10 @@ RUN rm -rf /var/lib/apt/lists/* /tmp/* /var/cache/apt/archives/*.deb 2>/dev/null
 
 EXPOSE 8443
 
+# Exec form (DL3025): the shell is named explicitly rather than left to the
+# builder's implicit `/bin/sh -c` wrapper. Same pipeline, same exit semantics.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD wget -qO- --no-check-certificate https://127.0.0.1:8443/api2/json/ping 2>/dev/null \
-        | grep -q '"data"[[:space:]]*:[[:space:]]*"pong"' || exit 1
+    CMD ["/bin/sh", "-c", "wget -qO- --no-check-certificate https://127.0.0.1:8443/api2/json/ping 2>/dev/null | grep -q '\"data\"[[:space:]]*:[[:space:]]*\"pong\"' || exit 1"]
 
 ENTRYPOINT ["/init"]
 
