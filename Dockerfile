@@ -176,34 +176,91 @@ RUN : > /etc/machine-id \
 #    a few other stock Debian packages PDM transitively needs. The local pool
 #    is unsigned (no InRelease/Release.gpg), hence Trusted: yes. The on-disk
 #    component is named "pdm" (not "main" as the Release file claims).
+#
+#    Alongside it, the official pdm-no-subscription repository. The ISO pool
+#    only ever contains the PDM build frozen at ISO-cut time (1.1.1 for ISO
+#    1.1-1, May 2026), while Proxmox ships PDM fixes through apt — 1.1.7 by
+#    July 2026 with no new ISO. ISO-only would mean shipping a PDM that is
+#    months of bugfixes behind with no signal that anything is stale.
+#
+#    This adds no new trust root: the repository is signed by the very same
+#    Proxmox Trixie release key the extractor stage already sha256-pinned and
+#    fingerprint-checked before it would unpack the ISO, so the key is copied
+#    across rather than re-fetched. http (not https) matches the ISO fetch and
+#    the stock debian.sources — apt's GPG check is what establishes integrity,
+#    and pdm-base has no ca-certificates until the next step installs it.
+#
+#    This source also survives into the runtime image, so PDM's daily-update
+#    probe surfaces real available updates in the UI's Updates panel. Applying
+#    them inside the container is ephemeral — they last only until container
+#    recreation — so treat the panel populating as a "go rebuild" signal, not
+#    as a live-upgrade mechanism. Define it exactly once: two stanzas for the
+#    same URI+suite with different Signed-By paths make apt refuse the whole
+#    source list ("Conflicting values set for option Signed-By"), which breaks
+#    that probe and every apt call in the container.
 # ---------------------------------------------------------------------------
+COPY --from=extractor /keys/proxmox-release.gpg /usr/share/keyrings/proxmox-release-trixie.gpg
+
 RUN set -eux; \
     install -d /etc/apt/sources.list.d; \
+    chmod 0644 /usr/share/keyrings/proxmox-release-trixie.gpg; \
     { \
         echo 'Types: deb'; \
         echo 'URIs: file:///srv/pdm-pool'; \
         echo 'Suites: trixie'; \
         echo 'Components: pdm'; \
         echo 'Trusted: yes'; \
-    } > /etc/apt/sources.list.d/pdm-local.sources
+    } > /etc/apt/sources.list.d/pdm-local.sources; \
+    { \
+        echo 'Types: deb'; \
+        echo 'URIs: http://download.proxmox.com/debian/pdm'; \
+        echo 'Suites: trixie'; \
+        echo 'Components: pdm-no-subscription'; \
+        echo 'Signed-By: /usr/share/keyrings/proxmox-release-trixie.gpg'; \
+    } > /etc/apt/sources.list.d/pdm-public.sources
 
 # ---------------------------------------------------------------------------
-# 4. Install Proxmox Datacenter Manager from the local (offline) pool.
+# 4. Install Proxmox Datacenter Manager at the pinned upstream version.
 #    NOTE: do NOT install proxmox-datacenter-manager-meta — it depends on
-#    proxmox-default-kernel which is useless and huge inside a container.
+#    proxmox-default-kernel which is useless and huge inside a container. It
+#    is only a Recommends of proxmox-datacenter-manager, so
+#    --no-install-recommends already keeps it out; naming the packages
+#    explicitly keeps that true even if upstream promotes it to Depends.
 #    ca-certificates is needed for HTTPS to managed Proxmox VE/PBS nodes.
+#
+#    Versions are pinned and then held. Unpinned, step 4b's dist-upgrade
+#    would silently roll PDM itself forward on every weekly rebuild — the
+#    Debian base rolling forward unattended is a documented, deliberate
+#    tradeoff (see 4b); the managed product drifting unattended is not.
+#    Bumps are a reviewed pin change driven by pdm-version-detector.
+#    -ui carries its own version stream (1.1.3 ≠ 1.1.7), hence two ARGs.
 # ---------------------------------------------------------------------------
+ARG PDM_PKG_VERSION=1.1.7
+ARG PDM_UI_PKG_VERSION=1.1.3
+
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        proxmox-datacenter-manager \
-        proxmox-datacenter-manager-ui \
-        proxmox-datacenter-manager-client \
+        "proxmox-datacenter-manager=${PDM_PKG_VERSION}" \
+        "proxmox-datacenter-manager-ui=${PDM_UI_PKG_VERSION}" \
+        "proxmox-datacenter-manager-client=${PDM_PKG_VERSION}" \
         ca-certificates \
         wget \
         xz-utils \
         openssh-server \
     ; \
+    apt-mark hold \
+        proxmox-datacenter-manager \
+        proxmox-datacenter-manager-ui \
+        proxmox-datacenter-manager-client \
+        proxmox-datacenter-manager-docs; \
+    # Assert the pin actually took. apt would happily satisfy the dep graph
+    # with the ISO pool's older build if the version string ever stops
+    # matching a candidate, and a silently-stale PDM is the exact failure
+    # this whole step exists to prevent.
+    got=$(dpkg-query -W -f='${Version}' proxmox-datacenter-manager); \
+    [ "$got" = "${PDM_PKG_VERSION}" ] \
+        || { echo "FATAL: PDM version pin not honoured: wanted ${PDM_PKG_VERSION}, got ${got}" >&2; exit 1; }; \
     # openssh-server is only run when PDM_SSH_ENABLED=1 at runtime (s6 service
     # exits early otherwise). Installed unconditionally so flipping the env var
     # doesn't require a rebuild. Host keys are persisted to pdm-data; daemon
@@ -334,26 +391,6 @@ RUN set -eux; \
     done
 
 # ---------------------------------------------------------------------------
-# 6b. Restore the public, no-subscription PDM apt source so PDM's daily-update
-#    probe surfaces real available updates in the UI's Updates panel between
-#    ISO releases. Scoped to Proxmox's release key via Signed-By; no other
-#    apt sources are present in the runtime image. *Applying* these updates
-#    inside the container is ephemeral — they survive only until container
-#    recreation, so treat the panel populating as a "go rebuild" signal,
-#    not as a working live-upgrade mechanism.
-# ---------------------------------------------------------------------------
-COPY --from=extractor /keys/proxmox-release.gpg /usr/share/keyrings/proxmox-release-trixie.gpg
-RUN set -eux; \
-    chmod 0644 /usr/share/keyrings/proxmox-release-trixie.gpg; \
-    { \
-        echo 'Types: deb'; \
-        echo 'URIs: http://download.proxmox.com/debian/pdm'; \
-        echo 'Suites: trixie'; \
-        echo 'Components: pdm-no-subscription'; \
-        echo 'Signed-By: /usr/share/keyrings/proxmox-release-trixie.gpg'; \
-    } > /etc/apt/sources.list.d/pdm-public.sources
-
-# ---------------------------------------------------------------------------
 # 7. Overlay the project rootfs (s6 services, cont-init scripts, shims).
 # ---------------------------------------------------------------------------
 COPY rootfs/ /
@@ -383,16 +420,19 @@ ENTRYPOINT ["/init"]
 # This LABEL block is the single source of truth for image metadata — CI
 # deliberately does NOT pass metadata-action labels to build-push-action, so
 # nothing overrides these on published images.
-# version / iso.release / iso.isorelease are auto-updated by
-# iso-bump-detector.yml on ISO bumps (derivable from the ISO filename; the
-# bump step asserts each sed landed). No kernel/debian-point-release labels:
-# the image ships no kernel, and dist-upgrade makes any point-release claim
-# stale by design — don't encode facts that rot unattended.
+# iso.release / iso.isorelease are auto-updated by iso-bump-detector.yml on
+# ISO bumps (derivable from the ISO filename; the bump step asserts each sed
+# landed). image.version tracks the PDM package actually installed, which is
+# the version a user cares about and no longer equals the ISO's frozen build
+# — pdm-version-detector.yml bumps it with the pin. No kernel/debian-point-
+# release labels: the image ships no kernel, and dist-upgrade makes any
+# point-release claim stale by design — don't encode facts that rot
+# unattended.
 # licenses: principal licenses only — a full per-package disclosure ships in
 # NOTICES.md and /usr/share/doc/*/copyright inside the image.
 LABEL org.opencontainers.image.title="Proxmox Datacenter Manager (community Docker repackaging)" \
       org.opencontainers.image.description="Unofficial Docker repackaging of the official Proxmox Datacenter Manager ISO. Not affiliated with Proxmox Server Solutions GmbH. 'Proxmox' is a trademark of Proxmox Server Solutions GmbH." \
-      org.opencontainers.image.version="1.1-iso1" \
+      org.opencontainers.image.version="${PDM_PKG_VERSION}" \
       org.opencontainers.image.revision="${GIT_REVISION}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.vendor="Community-maintained (unofficial)" \
@@ -402,6 +442,8 @@ LABEL org.opencontainers.image.title="Proxmox Datacenter Manager (community Dock
       org.opencontainers.image.url="${IMAGE_SOURCE_URL}" \
       org.opencontainers.image.documentation="${IMAGE_SOURCE_URL:+${IMAGE_SOURCE_URL}#readme}" \
       com.proxmox.product="pdm" \
+      com.proxmox.pdm.version="${PDM_PKG_VERSION}" \
+      com.proxmox.pdm.ui.version="${PDM_UI_PKG_VERSION}" \
       com.proxmox.iso.release="1.1" \
       com.proxmox.iso.isorelease="1" \
       com.proxmox.upstream.source="https://git.proxmox.com/?p=proxmox-datacenter-manager.git;a=summary" \

@@ -150,13 +150,17 @@ jobs:
           # from rotting on auto-bumps. sed exits 0 on no-match, so each
           # rewrite is asserted below — a reflowed LABEL block or README edit
           # fails this run loudly instead of publishing a stale label.
+          # NOTE: org.opencontainers.image.version is deliberately NOT touched
+          # here. It tracks the installed PDM *package* version (pinned by
+          # PDM_PKG_VERSION, bumped by pdm-version-detector.yml), which no
+          # longer equals the ISO release — the ISO only supplies the base
+          # rootfs. Rewriting it from the ISO filename would silently
+          # downgrade the label to the ISO's frozen build.
           rel="${LATEST_VER%-*}"; isorel="${LATEST_VER##*-}"
-          sed -i -E "s|(org.opencontainers.image.version=\")[^\"]+|\1${rel}-iso${isorel}|" Dockerfile
           sed -i -E "s|(com.proxmox.iso.release=\")[^\"]+|\1${rel}|"                Dockerfile
           sed -i -E "s|(com.proxmox.iso.isorelease=\")[^\"]+|\1${isorel}|"          Dockerfile
           sed -i -E "s|PDM [0-9.]+, ISO release [0-9]+|PDM ${rel}, ISO release ${isorel}|" README.md
-          grep -q "org.opencontainers.image.version=\"${rel}-iso${isorel}\"" Dockerfile \
-            && grep -q "com.proxmox.iso.release=\"${rel}\"" Dockerfile \
+          grep -q "com.proxmox.iso.release=\"${rel}\"" Dockerfile \
             && grep -q "com.proxmox.iso.isorelease=\"${isorel}\"" Dockerfile \
             && grep -q "PDM ${rel}, ISO release ${isorel}" README.md \
             || { echo "FATAL: a label/README sed matched nothing — file format changed; update the seds in this workflow" >&2; exit 1; }

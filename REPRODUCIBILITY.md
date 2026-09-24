@@ -9,6 +9,7 @@ A build is uniquely determined by:
 | Input                                | Pinning                                                                                 | Drift risk                    |
 | ------------------------------------ | --------------------------------------------------------------------------------------- | ----------------------------- |
 | `proxmox-datacenter-manager_1.1-1.iso` | sha256 in Dockerfile (`PDM_ISO_SHA256`) + GPG signature (`PROXMOX_KEY_FPR`)             | Frozen by Proxmox until next release |
+| `proxmox-datacenter-manager` `1.1.7`  | Exact version in Dockerfile (`PDM_PKG_VERSION`, `PDM_UI_PKG_VERSION`) + apt GPG against the pinned release key, then `apt-mark hold` | Frozen until `pdm-version-detector` bumps the pin |
 | Proxmox Trixie release GPG key       | sha256 in Dockerfile (`PROXMOX_KEY_SHA256`) + fingerprint check                          | Frozen until Proxmox rotates the key |
 | s6-overlay v3                        | Version in Dockerfile (`S6_OVERLAY_VERSION`) + sha256 sidecar from upstream release      | Frozen until we bump          |
 | BuildKit Dockerfile frontend         | Minor pin — `# syntax=docker/dockerfile:1.25`; bump deliberately, note in commit         | Frozen until we bump          |
@@ -21,7 +22,7 @@ A build is uniquely determined by:
 A second build, on the same commit, on the same day, on a similar machine:
 
 - The extracted `pdm-base.squashfs` and ISO apt pool layers — Proxmox's bytes don't move.
-- PDM packages installed from the local ISO pool.
+- PDM packages — pinned to an exact version from the official `pdm-no-subscription` repository and held, so repeated builds resolve the same `.deb`s until the pin is bumped.
 - s6-overlay binaries.
 - The `rootfs/` overlay.
 
@@ -29,10 +30,11 @@ A second build, on the same commit, on the same day, on a similar machine:
 
 - **Debian base packages** picked up by `apt-get install` for cross-dependency resolution (e.g. `ca-certificates` if Debian published a new version).
 - **All packages** lifted by the `dist-upgrade` step. This is the dominant source of drift; expect 30+ packages to differ between builds two weeks apart.
+- **Proxmox support packages** — `novnc-pve`, `pve-xtermjs`, `proxmox-widget-toolkit`, `proxmox-termproxy` and friends. The `pdm-no-subscription` source is configured before `dist-upgrade`, so these roll forward with the repository rather than staying frozen at the ISO's build. That is deliberate: they are PDM's own dependencies and are meant to move with it. Only the four `proxmox-datacenter-manager*` packages are held.
 - **Layer hashes** of every layer after the dist-upgrade step.
 - **Final image digest** — different on any two builds where the Debian base or dist-upgrade pulled new versions.
 
-The PDM packages themselves (the part most reviewers care about) remain pinned to the ISO pool and don't drift between builds of the same commit.
+The PDM packages themselves (the part most reviewers care about) are installed at an exact pinned version and then `apt-mark hold`-ed, so they don't drift between builds of the same commit — not even across the `dist-upgrade`.
 
 ## Reproducing a published build
 

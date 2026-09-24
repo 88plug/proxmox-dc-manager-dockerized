@@ -1,0 +1,199 @@
+name: pdm-version-detector
+
+# Polls the official pdm-no-subscription apt repository daily for a newer
+# Proxmox Datacenter Manager package and bumps the pin when one appears.
+#
+# Why this exists separately from iso-bump-detector: Proxmox ships PDM fixes
+# through apt, not by re-cutting the ISO. ISO 1.1-1 (May 2026) froze PDM at
+# 1.1.1 while the repository reached 1.1.7 by July 2026 with no new ISO, so
+# an ISO-only pin silently shipped months-old PDM with nothing going red.
+# The ISO still supplies the base rootfs; this workflow owns the product.
+#
+# Same safety model as iso-bump-detector: the bump is proven by a full image
+# build (which GPG-verifies both the ISO and the apt repository against the
+# pinned Trixie release key) plus a runtime /api2/json/ping smoke test before
+# anything reaches main. GITHUB_TOKEN pushes never trigger other workflows,
+# so build-and-sign is dispatched explicitly afterwards.
+
+on:
+  schedule:
+    - cron: '47 4 * * *'   # daily 04:47 UTC, after iso-bump-detector
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PDM_REPO: http://download.proxmox.com/debian/pdm
+  PDM_SUITE: trixie
+  PDM_COMPONENT: pdm-no-subscription
+
+jobs:
+  detect-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # to push the bump commit
+      actions:  write   # to dispatch build-and-sign
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Detect newest published PDM package
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          read_pin() {
+            grep -oE "^ARG $1=.+" Dockerfile | head -1 | cut -d= -f2
+          }
+          cur_pdm=$(read_pin PDM_PKG_VERSION)
+          cur_ui=$(read_pin PDM_UI_PKG_VERSION)
+          if [ -z "$cur_pdm" ] || [ -z "$cur_ui" ]; then
+            echo "FATAL: could not read PDM_PKG_VERSION / PDM_UI_PKG_VERSION from Dockerfile." >&2
+            echo "The ARG lines were renamed or reflowed — update this workflow." >&2
+            exit 1
+          fi
+
+          pkgs="${PDM_REPO}/dists/${PDM_SUITE}/${PDM_COMPONENT}/binary-amd64/Packages"
+          curl -fsSL "$pkgs" -o /tmp/Packages
+
+          # Highest published version of one binary package, debian-sort order.
+          newest() {
+            awk -v want="$1" '
+              /^Package: /  { pkg = $2 }
+              /^Version: /  { if (pkg == want) print $2 }
+            ' /tmp/Packages | sort -V | tail -n1
+          }
+          new_pdm=$(newest proxmox-datacenter-manager)
+          new_ui=$(newest proxmox-datacenter-manager-ui)
+
+          if [ -z "$new_pdm" ] || [ -z "$new_ui" ]; then
+            # The repository answered but the package names matched nothing.
+            # Left silent this would pin PDM forever with a green checkmark —
+            # the same unattended-rot hazard iso-bump-detector guards against.
+            echo "FATAL: no version found for proxmox-datacenter-manager / -ui in ${pkgs}." >&2
+            echo "Proxmox may have renamed the packages or moved the component." >&2
+            echo "Packages seen:" >&2
+            awk '/^Package: /{print "  " $2}' /tmp/Packages | sort -u | head -20 >&2
+            exit 1
+          fi
+
+          # Refuse to downgrade: a briefly re-spun repository index that drops
+          # the newest .deb must never walk the pin backwards.
+          older_or_same() {
+            [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]
+          }
+          if older_or_same "$cur_pdm" "$new_pdm" && older_or_same "$cur_ui" "$new_ui"; then
+            echo "pins current: pdm=$cur_pdm ui=$cur_ui (repo: $new_pdm / $new_ui)"
+
+            # Self-heal: if the pinned version's image never made it to GHCR
+            # (a transient publish failure), nothing else would ever retry it.
+            repo_lc=$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+            tok=$(curl -fsSL "https://ghcr.io/token?scope=repository:${repo_lc}:pull" | jq -r .token)
+            if ! curl -fsS -o /dev/null \
+                 -H "Authorization: Bearer $tok" \
+                 -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json" \
+                 "https://ghcr.io/v2/${repo_lc}/manifests/${cur_pdm}"; then
+              echo "image tag ${cur_pdm} missing from GHCR — re-dispatching build-and-sign on main"
+              gh workflow run build-and-sign.yml --ref main
+            fi
+            echo "needs_bump=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "bump available: pdm ${cur_pdm} -> ${new_pdm}, ui ${cur_ui} -> ${new_ui}"
+          {
+            echo "needs_bump=true"
+            echo "cur_pdm=$cur_pdm"
+            echo "cur_ui=$cur_ui"
+            echo "new_pdm=$new_pdm"
+            echo "new_ui=$new_ui"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Apply pin bump
+        if: steps.detect.outputs.needs_bump == 'true'
+        env:
+          CUR_PDM: ${{ steps.detect.outputs.cur_pdm }}
+          CUR_UI:  ${{ steps.detect.outputs.cur_ui }}
+          NEW_PDM: ${{ steps.detect.outputs.new_pdm }}
+          NEW_UI:  ${{ steps.detect.outputs.new_ui }}
+        run: |
+          set -euo pipefail
+          sed -i -E "s|^(ARG PDM_PKG_VERSION=).*|\1${NEW_PDM}|"    Dockerfile
+          sed -i -E "s|^(ARG PDM_UI_PKG_VERSION=).*|\1${NEW_UI}|"  Dockerfile
+          sed -i -E "s|PDM package version: \`[^\`]+\`|PDM package version: \`${NEW_PDM}\`|" README.md
+          sed -i -E "s|\`proxmox-datacenter-manager\` \`[^\`]+\`|\`proxmox-datacenter-manager\` \`${NEW_PDM}\`|" REPRODUCIBILITY.md
+          # sed exits 0 on no-match, so assert every rewrite landed. A
+          # reflowed Dockerfile or README fails this run loudly rather than
+          # publishing an image whose documented version is a lie.
+          grep -q "^ARG PDM_PKG_VERSION=${NEW_PDM}$" Dockerfile \
+            && grep -q "^ARG PDM_UI_PKG_VERSION=${NEW_UI}$" Dockerfile \
+            && grep -q "PDM package version: \`${NEW_PDM}\`" README.md \
+            && grep -q "\`proxmox-datacenter-manager\` \`${NEW_PDM}\`" REPRODUCIBILITY.md \
+            || { echo "FATAL: a pin/doc sed matched nothing — file format changed; update the seds in this workflow" >&2; exit 1; }
+          git --no-pager diff -- Dockerfile README.md REPRODUCIBILITY.md
+
+      - name: Verification build (exercises full GPG + smoke)
+        if: steps.detect.outputs.needs_bump == 'true'
+        run: |
+          set -euo pipefail
+          DOCKER_BUILDKIT=1 docker build -t pdm-verify:pkgbump \
+            --build-arg GIT_REVISION="$(git rev-parse --short=12 HEAD)" \
+            --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            .
+          docker run -d --rm --name pdm-verify \
+            -e PDM_ROOT_PASSWORD=verify-ci-only \
+            -p 18443:8443 \
+            pdm-verify:pkgbump
+          trap 'docker logs pdm-verify >&2 || true; docker rm -f pdm-verify >/dev/null 2>&1 || true' EXIT
+          ok=0
+          for i in $(seq 1 90); do
+            body=$(curl -fsSk https://127.0.0.1:18443/api2/json/ping 2>/dev/null || true)
+            if printf '%s' "$body" | grep -q '"data"[[:space:]]*:[[:space:]]*"pong"'; then
+              echo "ping ok after ${i}s (payload verified)"; ok=1; break
+            fi
+            sleep 1
+          done
+          if [ "$ok" != "1" ]; then
+            echo "verification: /api2/json/ping never returned expected payload" >&2
+            echo "verification: refusing to push bump — PDM API contract may have changed" >&2
+            exit 1
+          fi
+          # Prove the built image really carries the new PDM, not an ISO-pool
+          # fallback that merely satisfied the dependency graph.
+          got=$(docker run --rm --entrypoint dpkg-query pdm-verify:pkgbump \
+                  -W -f='${Version}' proxmox-datacenter-manager)
+          echo "installed PDM version: $got"
+          [ "$got" = "${{ steps.detect.outputs.new_pdm }}" ] \
+            || { echo "verification: image ships $got, expected ${{ steps.detect.outputs.new_pdm }}" >&2; exit 1; }
+
+      - name: Commit + push to main and publish
+        if: steps.detect.outputs.needs_bump == 'true'
+        env:
+          CUR_PDM:  ${{ steps.detect.outputs.cur_pdm }}
+          NEW_PDM:  ${{ steps.detect.outputs.new_pdm }}
+          NEW_UI:   ${{ steps.detect.outputs.new_ui }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name  "pdm-version-bot"
+          git config user.email "pdm-version-bot@users.noreply.github.com"
+          git add Dockerfile README.md REPRODUCIBILITY.md
+          git commit -m "chore: bump PDM package ${CUR_PDM} -> ${NEW_PDM} (ui ${NEW_UI})
+
+          Auto-detected by .github/workflows/pdm-version-detector.yml from the
+          official pdm-no-subscription repository and verified by a full image
+          build (GPG against the pinned Trixie release key) plus a runtime
+          smoke test and an installed-version assertion before push."
+          git push origin main
+          # GITHUB_TOKEN pushes never trigger other workflows (GitHub's
+          # recursion guard), so the push above cannot start build-and-sign.
+          # workflow_dispatch is the documented exception.
+          gh workflow run build-and-sign.yml --ref main
+          echo "dispatched build-and-sign on main for PDM ${NEW_PDM}"
