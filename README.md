@@ -14,7 +14,11 @@ A community-maintained Docker repackaging of the official **Proxmox Datacenter M
 
 ## Why this approach
 
-The build downloads the official PDM ISO exactly once (sha256-pinned, GPG signature verified against the pinned Proxmox release key, cached as a Docker layer) and then uses its squashfs root and embedded apt pool as the sole sources for PDM package installation. That version-pins the image to a specific ISO release: no risk of pulling a mismatched `proxmox-datacenter-manager` against a stale Debian Trixie snapshot, and a single source of truth for what's installed. The Debian base is then rolled forward to current Trixie security state in a documented, deliberate step (see `REPRODUCIBILITY.md` for the tradeoff). When Proxmox publishes a new ISO, [the daily bump detector](.github/workflows/iso-bump-detector.yml) updates the pins, verifies the build end to end, and publishes the release — no human in the loop.
+The build downloads the official PDM ISO exactly once (sha256-pinned, GPG signature verified against the pinned Proxmox release key, cached as a Docker layer) and uses its squashfs root as the base filesystem — a real Proxmox-built userspace, not a Debian image with PDM bolted on.
+
+PDM itself is then installed at an exact, pinned version from the official `pdm-no-subscription` repository, which is GPG-verified against the very same release key the ISO was checked with — no second trust root. This matters because Proxmox ships PDM fixes through apt rather than by re-cutting the ISO: ISO 1.1-1 froze PDM at `1.1.1`, while the repository had reached `1.1.7` two months later with no new ISO in sight. The packages are `apt-mark hold`-ed after install, so the weekly rebuild below cannot silently walk the product forward either — version changes are a reviewed pin bump, never a surprise.
+
+The Debian base is separately rolled forward to current Trixie security state in a documented, deliberate step (see `REPRODUCIBILITY.md` for the tradeoff). Two daily detectors keep the pins honest with no human in the loop: [the PDM version detector](.github/workflows/pdm-version-detector.yml) watches the apt repository, [the ISO bump detector](.github/workflows/iso-bump-detector.yml) watches for a new ISO. Both verify a full build and a live `/api2/json/ping` before anything is published, and both fail loudly rather than going quietly stale.
 
 ## At a glance
 
@@ -24,6 +28,7 @@ The build downloads the official PDM ISO exactly once (sha256-pinned, GPG signat
 - Volumes: `pdm-config` (`/etc/proxmox-datacenter-manager`), `pdm-data` (`/var/lib/proxmox-datacenter-manager`)
 - Tmpfs: `/run/proxmox-datacenter-manager`
 - Architecture: `linux/amd64` only (PDM has no upstream arm64 build)
+- PDM package version: `1.1.7` — installed from the official `pdm-no-subscription` repository, GPG-verified against the same pinned Proxmox release key as the ISO, pinned and held so a rebuild can't drift it
 - ISO: `proxmox-datacenter-manager_1.1-1.iso` (PDM 1.1, ISO release 1)
   - sha256 `11a55a069ba564220bd986241b57920a83781d40be18d6f2bf7b9b12696ae2cc`
   - GPG-signed by `24B30F06ECC1836A4E5EFECBA7BCD1420BFE778E` (Proxmox Trixie Release Key); the build verifies the detached signature with gpgv before unpacking

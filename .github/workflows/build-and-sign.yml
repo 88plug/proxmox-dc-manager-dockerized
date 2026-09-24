@@ -66,6 +66,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # The PDM package version is the number users actually shop for, and it
+      # no longer tracks the ISO release (the ISO only supplies the base
+      # rootfs). Read the pin so every publish carries a :<pdm-version> tag.
+      - name: Read pinned PDM version
+        id: pdm
+        run: |
+          set -euo pipefail
+          v=$(grep -oE '^ARG PDM_PKG_VERSION=.+' Dockerfile | head -1 | cut -d= -f2)
+          [ -n "$v" ] || { echo "FATAL: PDM_PKG_VERSION pin not found in Dockerfile" >&2; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
       - name: Derive image metadata
         id: meta
         uses: docker/metadata-action@v6
@@ -86,6 +97,9 @@ jobs:
             type=schedule,pattern=edge
             type=schedule,pattern=weekly-{{date 'YYYYMMDD'}}
             type=sha,format=short
+            # PDM package version (e.g. "1.1.7") on anything we publish, so
+            # users can pin the product version rather than the ISO release.
+            type=raw,value=${{ steps.pdm.outputs.version }},enable=${{ github.event_name != 'pull_request' }}
 
       - name: Resolve build args
         id: args
@@ -114,8 +128,14 @@ jobs:
             GIT_REVISION=${{ steps.args.outputs.git_revision }}
             BUILD_DATE=${{ steps.args.outputs.build_date }}
             IMAGE_SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
-          provenance: mode=max
-          sbom: true
+          # Attestations produce a manifest *list*, which the docker exporter
+          # cannot load — `load: true` on the PR path failed every pull
+          # request with "docker exporter does not currently support
+          # exporting manifest lists", killing the job in ~30s before the
+          # smoke test below ever ran. Nothing is published from a PR, so
+          # provenance/SBOM buy nothing there; keep them for real pushes.
+          provenance: ${{ github.event_name != 'pull_request' && 'mode=max' || 'false' }}
+          sbom: ${{ github.event_name != 'pull_request' }}
           # Scheduled runs bust the cache so Debian dist-upgrade actually
           # picks up new packages instead of replaying the cached layer.
           no-cache: ${{ github.event_name == 'schedule' }}
@@ -167,8 +187,25 @@ jobs:
           COSIGN_EXPERIMENTAL: '1'
         run: |
           set -euo pipefail
+          # Sigstore's public-good Fulcio/Rekor are a shared free service and
+          # do time out — a `context deadline exceeded` on 2026-09-20 left
+          # :latest/:edge published but UNSIGNED and un-attested for a week,
+          # while SECURITY.md tells users to `cosign verify` it. The image is
+          # already pushed by the time we get here, so a bare failure cannot
+          # be rolled back; retry instead. Re-signing an already-signed
+          # digest is harmless (another signature is attached).
           for tag in $TAGS; do
-            cosign sign --yes --recursive "${tag}@${DIGEST}"
+            for attempt in 1 2 3; do
+              if cosign sign --yes --recursive "${tag}@${DIGEST}"; then
+                break
+              fi
+              if [ "$attempt" = 3 ]; then
+                echo "FATAL: cosign failed 3x for ${tag}@${DIGEST}" >&2
+                exit 1
+              fi
+              echo "cosign attempt ${attempt} failed for ${tag}; retrying in $((attempt * 30))s" >&2
+              sleep $((attempt * 30))
+            done
           done
 
       - name: Attest SLSA build provenance
@@ -178,6 +215,21 @@ jobs:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
+
+      # SECURITY.md hands users a cosign command and tells them it will pass.
+      # Run that exact command here so a publish that produced an unverifiable
+      # image fails the build instead of sitting green in the Actions tab.
+      - name: Verify the published image verifies
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository_owner }}/.*" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${DIGEST}" > /dev/null
+          echo "verified: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${DIGEST}"
 
       - name: Trivy vulnerability scan
         uses: aquasecurity/trivy-action@v0.36.0
@@ -204,7 +256,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: hadolint
-        uses: hadolint/hadolint-action@v3.3.0
+        uses: hadolint/hadolint-action@v3.5.0
         with:
           dockerfile: Dockerfile
           failure-threshold: warning
