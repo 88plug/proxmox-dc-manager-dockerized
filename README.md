@@ -286,12 +286,12 @@ The workflows function correctly with GitHub's default repo settings. If you wan
 
 ### Debian base updates between ISO releases
 
-The Dockerfile runs `apt-get dist-upgrade` against `deb.debian.org` once during the build (after PDM is installed from the local ISO pool, before the apt sources are wiped). That lifts glibc, openssl, ca-certificates, and the rest of the Debian Trixie base to current security/point-release state without waiting for Proxmox to publish a new ISO.
+The Dockerfile runs `apt-get dist-upgrade` against `deb.debian.org` once during the build (after PDM is installed, before the apt sources are wiped). That lifts glibc, openssl, ca-certificates, and the rest of the Debian Trixie base to current security/point-release state without waiting for Proxmox to publish a new ISO.
 
 - `make build` — incremental; Docker caches the dist-upgrade layer, so a second build the next day reuses yesterday's snapshot.
 - `make refresh` — `--pull --no-cache`; forces a fresh pull of `debian:trixie-slim` in the extractor and a fresh `apt-get update && dist-upgrade` in the final image. Use this when you want current Debian patches without bumping the ISO pin.
 
-Tradeoff: hermeticity loosens. Two builds on different days with the same pinned ISO can diverge by however much Debian has shipped between them. The PDM packages themselves remain pinned to the ISO's local apt pool.
+Tradeoff: hermeticity loosens. Two builds on different days with the same pinned ISO can diverge by however much Debian has shipped between them. The PDM packages themselves are unaffected — they are pinned to an exact version and `apt-mark hold`-ed, so `dist-upgrade` cannot move them.
 
 ## Troubleshooting
 

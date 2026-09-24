@@ -66,10 +66,10 @@ After `make build`:
 # Inspect labels.
 docker inspect proxmox-dc-manager:local --format '{{ json .Config.Labels }}' | jq
 
-# Confirm PDM was installed from the ISO pool (the on-disk PDM .deb's sha256
-# should match what unsquashfs extracted from the ISO).
+# Confirm PDM is at the pinned version and held (so dist-upgrade can't
+# have moved it).
 docker run --rm proxmox-dc-manager:local sh -c \
-  'dpkg -l | grep proxmox-datacenter-manager'
+  'dpkg -l | grep proxmox-datacenter-manager; apt-mark showhold'
 
 # Confirm the dist-upgrade lifted Debian Trixie.
 docker run --rm proxmox-dc-manager:local sh -c \
